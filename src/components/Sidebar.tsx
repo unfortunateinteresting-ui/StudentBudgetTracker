@@ -1,5 +1,6 @@
 import clsx from "clsx";
 
+import type { ThemeMode } from "../lib/theme";
 import type { Workspace } from "../lib/types";
 import styles from "./Sidebar.module.css";
 
@@ -14,10 +15,12 @@ const WORKSPACES: Array<{ id: Workspace; label: string }> = [
 
 interface SidebarProps {
   workspace: Workspace;
+  theme: ThemeMode;
   onSelect: (workspace: Workspace) => void;
+  onToggleTheme: () => void;
 }
 
-export function Sidebar({ workspace, onSelect }: SidebarProps) {
+export function Sidebar({ workspace, theme, onSelect, onToggleTheme }: SidebarProps) {
   return (
     <aside className={styles.sidebar}>
       <div className={styles.brand}>
@@ -39,6 +42,10 @@ export function Sidebar({ workspace, onSelect }: SidebarProps) {
       </nav>
 
       <div className={styles.footer}>
+        <button className={styles.themeButton} onClick={onToggleTheme} type="button">
+          {theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+        </button>
+        <br />
         Saved on this computer
         <br />
         Desktop app

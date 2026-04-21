@@ -8,7 +8,7 @@ import {
   setMonthlyCap,
   updateRecurringRule,
 } from "../lib/api";
-import { currentMonthKey, currency, monthLabel } from "../lib/format";
+import { currentMonthKey, currency, monthLabel, shiftMonthKey } from "../lib/format";
 import type {
   Account,
   AppSettings,
@@ -63,9 +63,6 @@ type EditingCapState = {
   month_key: string;
 };
 
-const monthName = (month: number) =>
-  new Intl.DateTimeFormat("en-US", { month: "long" }).format(new Date(2024, month - 1, 1));
-
 const emptyRuleForm = (accountId = ""): RuleFormState => ({
   label: "",
   entry_kind: "expense",
@@ -94,6 +91,7 @@ export function PlanPage({
   onWhy,
   onRefresh,
 }: PlanPageProps) {
+  const currentMonth = currentMonthKey();
   const activeAccounts = useMemo(
     () => accounts.filter((account) => !account.archived),
     [accounts],
@@ -131,8 +129,6 @@ export function PlanPage({
     return options;
   }, [accounts, activeAccounts, editingRuleId, rule.account_id]);
 
-  const currentMonth = currentMonthKey();
-
   const sortedRules = useMemo(
     () =>
       [...recurringRules].sort((left, right) => {
@@ -156,15 +152,67 @@ export function PlanPage({
     [monthlyCaps],
   );
 
-  const currentMonthCaps = useMemo(
-    () => sortedCaps.filter((item) => item.month_key === currentMonth),
-    [currentMonth, sortedCaps],
+  const preferredCapMonth = useMemo(() => {
+    if (sortedCaps.some((item) => item.month_key === currentMonth)) {
+      return currentMonth;
+    }
+    return sortedCaps[0]?.month_key ?? currentMonth;
+  }, [currentMonth, sortedCaps]);
+
+  const [visibleCapMonth, setVisibleCapMonth] = useState<string>(preferredCapMonth);
+
+  const capMonthOptions = useMemo(() => {
+    const months = new Set<string>([currentMonth]);
+    snapshot.monthly_series.forEach((item) => months.add(item.month_key));
+    sortedCaps.forEach((item) => months.add(item.month_key));
+    return [...months].sort((left, right) => right.localeCompare(left));
+  }, [currentMonth, snapshot.monthly_series, sortedCaps]);
+
+  useEffect(() => {
+    if (!capMonthOptions.includes(visibleCapMonth)) {
+      setVisibleCapMonth(preferredCapMonth);
+    }
+  }, [capMonthOptions, preferredCapMonth, visibleCapMonth]);
+
+  const activityByMonth = useMemo(
+    () => new Map(snapshot.activity_groups.map((group) => [group.month_key, group])),
+    [snapshot.activity_groups],
   );
 
-  const spendByCategory = useMemo(
-    () => new Map(snapshot.category_spend_this_month.map((item) => [item.label, item.value])),
-    [snapshot.category_spend_this_month],
+  const visibleMonthCaps = useMemo(
+    () => sortedCaps.filter((item) => item.month_key === visibleCapMonth),
+    [sortedCaps, visibleCapMonth],
   );
+
+  const visibleMonthSpendByCategory = useMemo(() => {
+    const categoryMap = new Map<string, number>();
+    const monthEntries = activityByMonth.get(visibleCapMonth)?.entries ?? [];
+    monthEntries.forEach((entry) => {
+      if (entry.entry_kind !== "expense" || entry.exclude_from_insights) {
+        return;
+      }
+      categoryMap.set(entry.category, (categoryMap.get(entry.category) ?? 0) + entry.amount);
+    });
+    return categoryMap;
+  }, [activityByMonth, visibleCapMonth]);
+
+  const visibleMonthCapTotal = useMemo(
+    () =>
+      visibleMonthCaps.reduce((sum, item) => {
+        return sum + item.amount;
+      }, 0),
+    [visibleMonthCaps],
+  );
+
+  const visibleMonthSpendTotal = useMemo(
+    () =>
+      visibleMonthCaps.reduce((sum, item) => {
+        return sum + (visibleMonthSpendByCategory.get(item.category) ?? 0);
+      }, 0),
+    [visibleMonthCaps, visibleMonthSpendByCategory],
+  );
+
+  const visibleMonthCapRoom = visibleMonthCapTotal - visibleMonthSpendTotal;
 
   const upcomingObligationTotal = useMemo(
     () =>
@@ -185,34 +233,30 @@ export function PlanPage({
     return { active, manual, paused, monthlyFixed };
   }, [recurringRules]);
 
-  const schoolYearMonths = useMemo(() => {
+  const planningMonths = useMemo(() => {
     if (snapshot.monthly_series.length) {
       return snapshot.monthly_series.slice(0, settings.school_year_months);
     }
 
-    const today = new Date();
     return Array.from({ length: settings.school_year_months }, (_, index) => {
-      const year = today.getFullYear() + Math.floor((settings.school_year_start_month - 1 + index) / 12);
-      const month = ((settings.school_year_start_month - 1 + index) % 12) + 1;
+      const monthKey = shiftMonthKey(currentMonth, index);
       return {
-        month_key: `${year}-${String(month).padStart(2, "0")}`,
+        month_key: monthKey,
         spent: 0,
         cap: 0,
         runway_balance: snapshot.total_available_cash,
       };
     });
-  }, [
-    settings.school_year_months,
-    settings.school_year_start_month,
-    snapshot.monthly_series,
-    snapshot.total_available_cash,
-  ]);
+  }, [currentMonth, settings.school_year_months, snapshot.monthly_series, snapshot.total_available_cash]);
 
-  const schoolYearEndMonth =
-    ((settings.school_year_start_month - 1 + settings.school_year_months - 1) % 12) + 1;
-  const schoolYearTitle = `${monthName(settings.school_year_start_month)} to ${monthName(
-    schoolYearEndMonth,
-  )}`;
+  const planningWindowTitle = useMemo(() => {
+    if (!planningMonths.length) {
+      return monthLabel(currentMonth);
+    }
+    const firstMonth = planningMonths[0]?.month_key ?? currentMonth;
+    const lastMonth = planningMonths[planningMonths.length - 1]?.month_key ?? currentMonth;
+    return `${monthLabel(firstMonth)} to ${monthLabel(lastMonth)}`;
+  }, [currentMonth, planningMonths]);
 
   const runAction = async (work: () => Promise<unknown>, successText: string) => {
     try {
@@ -319,6 +363,7 @@ export function PlanPage({
   };
 
   const startCapEdit = (item: MonthlyCap) => {
+    setVisibleCapMonth(item.month_key);
     setEditingCap({
       id: item.id,
       category: item.category,
@@ -373,8 +418,8 @@ export function PlanPage({
           )}
         />
         <MetricCard
-          eyebrow="School year"
-          note="Remaining fixed bills and caps come from the Rust snapshot."
+          eyebrow="Planning"
+          note="Remaining recurring bills and caps come from the Rust snapshot."
           onWhy={() => onWhy("projected_end_of_year_cushion")}
           title="Projected end balance"
           value={currency(snapshot.projected_end_of_year_cushion)}
@@ -392,8 +437,8 @@ export function PlanPage({
               Why?
             </button>
           }
-          eyebrow="School year"
-          title={schoolYearTitle}
+          eyebrow="Planning window"
+          title={planningWindowTitle}
         >
           <div className={styles.statGrid}>
             <div className={styles.statBlock}>
@@ -413,8 +458,8 @@ export function PlanPage({
               <div className={styles.statValue}>{currency(recurringSummary.monthlyFixed)}</div>
             </div>
             <div className={styles.statBlock}>
-              <div className={styles.statLabel}>Planning months loaded</div>
-              <div className={styles.statValue}>{schoolYearMonths.length}</div>
+              <div className={styles.statLabel}>Months loaded</div>
+              <div className={styles.statValue}>{planningMonths.length}</div>
             </div>
           </div>
 
@@ -430,7 +475,7 @@ export function PlanPage({
                 </tr>
               </thead>
               <tbody>
-                {schoolYearMonths.map((item) => {
+                {planningMonths.map((item) => {
                   const capRoom = item.cap - item.spent;
                   return (
                     <tr key={item.month_key}>
@@ -504,7 +549,9 @@ export function PlanPage({
 
       <div className={styles.grid2}>
         <section className={styles.stack}>
-          <h2>{editingRuleId ? "Edit recurring rule" : "Recurring rules"}</h2>
+          <h2 className={styles.sectionHeading}>
+            {editingRuleId ? "Edit recurring rule" : "Recurring rules"}
+          </h2>
           <div className={styles.filters}>
             <input
               className={styles.input}
@@ -617,6 +664,10 @@ export function PlanPage({
               Create or restore an active account before adding recurring rules.
             </div>
           ) : null}
+          <div className={styles.helperText}>
+            If rent continues through summer, keep the recurring rent rule active until the
+            contract end date so the planning window includes it.
+          </div>
           {editingRuleId &&
           rule.account_id &&
           !activeAccounts.some((account) => account.id === rule.account_id) ? (
@@ -731,7 +782,9 @@ export function PlanPage({
         </section>
 
         <section className={styles.stack}>
-          <h2>{editingCap ? "Adjust monthly cap" : "Monthly caps"}</h2>
+          <h2 className={styles.sectionHeading}>
+            {editingCap ? "Adjust monthly cap" : "Monthly caps"}
+          </h2>
           <div className={styles.filters}>
             <input
               className={styles.input}
@@ -776,7 +829,52 @@ export function PlanPage({
             </div>
           ) : null}
 
-          <SectionCard eyebrow="Current month" title={`${monthLabel(currentMonth)} cap coverage`}>
+          <SectionCard
+            action={
+              <label className={styles.headerControl}>
+                <span className={styles.controlLabel}>Show month</span>
+                <select
+                  className={styles.select}
+                  disabled={Boolean(editingCap)}
+                  onChange={(event) => setVisibleCapMonth(event.target.value)}
+                  value={visibleCapMonth}
+                >
+                  {capMonthOptions.map((monthKey) => (
+                    <option key={monthKey} value={monthKey}>
+                      {monthLabel(monthKey)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            }
+            eyebrow="Monthly caps"
+            title={`${monthLabel(visibleCapMonth)} cap coverage`}
+          >
+            <div className={styles.statGrid}>
+              <div className={styles.statBlock}>
+                <div className={styles.statLabel}>Cap total</div>
+                <div className={styles.statValue}>{currency(visibleMonthCapTotal)}</div>
+              </div>
+              <div className={styles.statBlock}>
+                <div className={styles.statLabel}>Capped spend</div>
+                <div className={styles.statValue}>{currency(visibleMonthSpendTotal)}</div>
+              </div>
+              <div className={styles.statBlock}>
+                <div className={styles.statLabel}>Remaining room</div>
+                <div
+                  className={`${styles.statValue} ${
+                    visibleMonthCapRoom >= 0 ? styles.positive : styles.negative
+                  }`}
+                >
+                  {currency(visibleMonthCapRoom)}
+                </div>
+              </div>
+              <div className={styles.statBlock}>
+                <div className={styles.statLabel}>Categories</div>
+                <div className={styles.statValue}>{visibleMonthCaps.length}</div>
+              </div>
+            </div>
+
             <div className={styles.tableWrap}>
               <table className={styles.table}>
                 <thead>
@@ -785,12 +883,13 @@ export function PlanPage({
                     <th>Cap</th>
                     <th>Spent</th>
                     <th>Variance</th>
+                    <th />
                   </tr>
                 </thead>
                 <tbody>
-                  {currentMonthCaps.length ? (
-                    currentMonthCaps.map((item) => {
-                      const spent = spendByCategory.get(item.category) ?? 0;
+                  {visibleMonthCaps.length ? (
+                    visibleMonthCaps.map((item) => {
+                      const spent = visibleMonthSpendByCategory.get(item.category) ?? 0;
                       const variance = item.amount - spent;
                       return (
                         <tr key={item.id}>
@@ -800,13 +899,36 @@ export function PlanPage({
                           <td className={variance >= 0 ? styles.positive : styles.negative}>
                             {currency(variance)}
                           </td>
+                          <td>
+                            <div className={styles.rowActions}>
+                              <button
+                                className={styles.pillButton}
+                                onClick={() => startCapEdit(item)}
+                                type="button"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                className={styles.dangerButton}
+                                onClick={() =>
+                                  void runAction(
+                                    () => deleteMonthlyCap(item.id),
+                                    `Deleted ${item.category} cap for ${item.month_key}.`,
+                                  )
+                                }
+                                type="button"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </td>
                         </tr>
                       );
                     })
                   ) : (
                     <tr>
-                      <td className={styles.emptyState} colSpan={4}>
-                        No caps saved for {monthLabel(currentMonth)}.
+                      <td className={styles.emptyState} colSpan={5}>
+                        No caps saved for {monthLabel(visibleCapMonth)}.
                       </td>
                     </tr>
                   )}
@@ -814,59 +936,6 @@ export function PlanPage({
               </table>
             </div>
           </SectionCard>
-
-          <div className={styles.tableWrap}>
-            <table className={styles.table}>
-              <thead>
-                <tr>
-                  <th>Month</th>
-                  <th>Category</th>
-                  <th>Amount</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {sortedCaps.length ? (
-                  sortedCaps.map((item) => (
-                    <tr key={item.id}>
-                      <td>{monthLabel(item.month_key)}</td>
-                      <td>{item.category}</td>
-                      <td>{currency(item.amount)}</td>
-                      <td>
-                        <div className={styles.rowActions}>
-                          <button
-                            className={styles.pillButton}
-                            onClick={() => startCapEdit(item)}
-                            type="button"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            className={styles.dangerButton}
-                            onClick={() =>
-                              void runAction(
-                                () => deleteMonthlyCap(item.id),
-                                `Deleted ${item.category} cap for ${item.month_key}.`,
-                              )
-                            }
-                            type="button"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td className={styles.emptyState} colSpan={4}>
-                      No monthly caps yet.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
         </section>
       </div>
     </div>

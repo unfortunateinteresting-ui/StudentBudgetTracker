@@ -31,7 +31,7 @@ export function LineChart({ data }: LineChartProps) {
   const tickLegend = [
     { label: "Spent", color: "var(--color-clay)" },
     { label: "Cap", color: "var(--color-forest)" },
-    { label: "Balance", color: "var(--color-ink)" },
+    { label: "Projected balance", color: "var(--color-ink)" },
   ];
 
   return (
@@ -41,10 +41,10 @@ export function LineChart({ data }: LineChartProps) {
           {({ width, height }) => {
             const innerWidth = Math.max(width - margin.left - margin.right, 140);
             const innerHeight = Math.max(height - margin.top - margin.bottom, 140);
-            const maxValue = Math.max(
-              ...data.flatMap((item) => [item.spent, item.cap, item.runway_balance]),
-              1,
-            );
+            const values = data.flatMap((item) => [item.spent, item.cap, item.runway_balance]);
+            const minValue = Math.min(...values, 0);
+            const maxValue = Math.max(...values, 0, 1);
+            const span = Math.max(maxValue - minValue, 1);
 
             const xScale = scaleBand<string>({
               domain: data.map((item) => item.month_key),
@@ -53,7 +53,7 @@ export function LineChart({ data }: LineChartProps) {
             });
 
             const yScale = scaleLinear<number>({
-              domain: [0, maxValue * 1.15],
+              domain: [minValue - span * 0.1, maxValue + span * 0.12],
               range: [innerHeight, 0],
               nice: true,
             });
@@ -73,7 +73,7 @@ export function LineChart({ data }: LineChartProps) {
                   <GridRows
                     height={innerHeight}
                     scale={yScale}
-                    stroke="rgba(22, 24, 19, 0.08)"
+                    stroke="var(--color-chart-grid)"
                     width={innerWidth}
                   />
                   <LinePath
@@ -125,7 +125,7 @@ export function LineChart({ data }: LineChartProps) {
                     scale={yScale}
                     tickFormat={(value) => currency(Number(value))}
                     tickLabelProps={() => ({
-                      fill: "rgba(22, 24, 19, 0.7)",
+                      fill: "var(--color-chart-muted)",
                       fontFamily: "IBM Plex Sans",
                       fontSize: 11,
                       textAnchor: "end",
@@ -136,7 +136,7 @@ export function LineChart({ data }: LineChartProps) {
                     scale={xScale}
                     tickFormat={(value) => monthTickLabel(String(value))}
                     tickLabelProps={() => ({
-                      fill: "rgba(22, 24, 19, 0.7)",
+                      fill: "var(--color-chart-muted)",
                       fontFamily: "IBM Plex Sans",
                       fontSize: 9,
                       textAnchor: "middle",

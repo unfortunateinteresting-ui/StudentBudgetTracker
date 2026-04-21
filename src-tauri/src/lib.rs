@@ -479,6 +479,20 @@ fn school_year_month_keys(settings: &AppSettings, reference: NaiveDate) -> Vec<S
     months
 }
 
+fn forward_month_keys(start: NaiveDate, total_months: u32) -> Vec<String> {
+    let mut months = Vec::new();
+    let mut month_start = start;
+    for _ in 0..total_months.max(1) {
+        months.push(format!(
+            "{}-{:02}",
+            month_start.year(),
+            month_start.month()
+        ));
+        month_start = add_months(month_start, 1);
+    }
+    months
+}
+
 fn is_rent_like(entry: &str) -> bool {
     let text = entry.trim().to_lowercase();
     text.contains("rent") || text.contains("loyer")
@@ -1362,7 +1376,10 @@ fn resolve_snapshot_query(
         };
 
     let range_months = match &range {
-        InsightRangeSpec::SchoolYear => school_year_month_keys(settings, reference_date),
+        InsightRangeSpec::SchoolYear => {
+            let planning_start = parse_month_start(&focus_month)?;
+            forward_month_keys(planning_start, settings.school_year_months)
+        }
         InsightRangeSpec::CurrentMonth => vec![focus_month.clone()],
         InsightRangeSpec::Month(month) => vec![month.clone()],
     };
@@ -1769,7 +1786,7 @@ fn calculate_snapshot_with_query(
             format!("Total available cash = {}", total_available_cash),
             format!("Remaining fixed bills = {}", remaining_fixed_bills),
             format!(
-                "Runway after fixed bills = {}",
+                "Balance after remaining fixed bills in the planning window = {}",
                 school_year_runway_remaining
             ),
         ]),
@@ -1780,7 +1797,10 @@ fn calculate_snapshot_with_query(
             format!("Total available cash = {}", total_available_cash),
             format!("Remaining fixed bills = {}", remaining_fixed_bills),
             format!("Remaining monthly caps = {}", remaining_caps),
-            format!("Projected cushion = {}", projected_end_of_year_cushion),
+            format!(
+                "Projected end balance for the planning window = {}",
+                projected_end_of_year_cushion
+            ),
         ]),
     );
     breakdowns.insert(
@@ -1938,8 +1958,8 @@ fn breakdown_title(metric_id: &str) -> String {
     match metric_id {
         "total_available_cash" => "Total available cash".to_string(),
         "this_month_spend" => "This month spend".to_string(),
-        "school_year_runway_remaining" => "School-year runway".to_string(),
-        "projected_end_of_year_cushion" => "Projected end-of-year cushion".to_string(),
+        "school_year_runway_remaining" => "Planning window balance".to_string(),
+        "projected_end_of_year_cushion" => "Projected end balance".to_string(),
         "rent_net_this_month" => "Rent net this month".to_string(),
         other => format!("Calculation details: {other}"),
     }
@@ -3450,6 +3470,38 @@ mod tests {
         let months = school_year_month_keys(&settings, parse_date("2026-04-19").unwrap());
         assert_eq!(months.first().unwrap(), "2025-09");
         assert_eq!(months.last().unwrap(), "2026-05");
+    }
+
+    #[test]
+    fn planning_window_months_follow_the_focus_month_forward() {
+        let settings = AppSettings {
+            school_year_start_month: 9,
+            school_year_months: 5,
+            language: "EN".into(),
+            backup_retention: 50,
+            last_migration_version: 2,
+        };
+
+        let query = resolve_snapshot_query(
+            &settings,
+            None,
+            Some(EntryFilters {
+                month_key: Some("2026-04".into()),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            query.range_months,
+            vec![
+                "2026-04".to_string(),
+                "2026-05".to_string(),
+                "2026-06".to_string(),
+                "2026-07".to_string(),
+                "2026-08".to_string()
+            ]
+        );
     }
 
     #[test]

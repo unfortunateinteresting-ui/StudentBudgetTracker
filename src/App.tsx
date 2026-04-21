@@ -6,6 +6,8 @@ import {
   getCalculationBreakdown,
   runStartupRecurringCheck,
 } from "./lib/api";
+import { applyThemeMode, readThemeMode } from "./lib/theme";
+import type { ThemeMode } from "./lib/theme";
 import type {
   BootstrapState,
   BreakdownResult,
@@ -27,6 +29,7 @@ import styles from "./App.module.css";
 
 export function App() {
   const [workspace, setWorkspace] = useState<Workspace>("home");
+  const [theme, setTheme] = useState<ThemeMode>(() => readThemeMode());
   const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
   const [error, setError] = useState<string>("");
   const [entryDialogOpen, setEntryDialogOpen] = useState(false);
@@ -54,6 +57,10 @@ export function App() {
       setMissedRecurring([]);
     }
   }, []);
+
+  useEffect(() => {
+    applyThemeMode(theme);
+  }, [theme]);
 
   useEffect(() => {
     void refresh();
@@ -151,7 +158,12 @@ export function App() {
 
   return (
     <div className={styles.shell}>
-      <Sidebar onSelect={setWorkspace} workspace={workspace} />
+      <Sidebar
+        onSelect={setWorkspace}
+        onToggleTheme={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
+        theme={theme}
+        workspace={workspace}
+      />
       <main className={styles.content}>
         <div className={styles.frame}>
           <MissedRecurringBanner

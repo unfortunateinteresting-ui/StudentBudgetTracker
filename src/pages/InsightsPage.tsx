@@ -64,18 +64,18 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
           value={currency(snapshot.this_month_spend)}
         />
         <MetricCard
-          eyebrow="School year"
-          note="Money left after remaining fixed bills for the school year."
+          eyebrow="Planning"
+          note="Money left after remaining recurring bills in the planning window."
           onWhy={() => onWhy("school_year_runway_remaining")}
-          title="School-year balance"
+          title="Planning balance"
           value={currency(snapshot.school_year_runway_remaining)}
         />
       </div>
 
       <div className={styles.grid2}>
         <MetricCard
-          eyebrow="School year"
-          note="Includes remaining fixed bills and monthly caps."
+          eyebrow="Planning"
+          note="Includes remaining recurring bills and monthly caps."
           onWhy={() => onWhy("projected_end_of_year_cushion")}
           title="Projected end balance"
           value={currency(snapshot.projected_end_of_year_cushion)}
@@ -90,7 +90,10 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
       </div>
 
       <div className={styles.grid2}>
-        <SectionCard eyebrow="Monthly totals" title="Monthly spending, cap, and balance">
+        <SectionCard
+          eyebrow="Planning window"
+          title="Forward monthly spending, cap, and balance"
+        >
           <LineChart data={snapshot.monthly_series} />
         </SectionCard>
         <SectionCard eyebrow="This month" title="Category totals this month">
@@ -140,7 +143,7 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
           </div>
         </SectionCard>
 
-        <SectionCard eyebrow="School year" title="Summary">
+        <SectionCard eyebrow="Planning window" title="Summary">
           <div className={styles.summaryList}>
             <div className={styles.summaryRow}>
               <span>Months loaded</span>
@@ -166,7 +169,7 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
         </SectionCard>
       </div>
 
-      <SectionCard eyebrow="Monthly data" title="Month-by-month totals">
+      <SectionCard eyebrow="Planning window" title="Month-by-month totals">
         <div className={styles.tableWrap}>
           <table className={styles.table}>
             <thead>

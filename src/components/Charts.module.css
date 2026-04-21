@@ -15,7 +15,7 @@
 .chartEmpty {
   border-radius: 1rem;
   border: 1px dashed var(--color-border);
-  background: rgba(255, 255, 255, 0.55);
+  background: var(--color-surface-muted);
   color: var(--color-muted);
   padding: 1rem;
 }

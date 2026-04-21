@@ -8,14 +8,20 @@
 .content {
   min-height: 100vh;
   padding: 1.4rem;
-  background: linear-gradient(180deg, #223329 0, #223329 10.5rem, #efe8dc 10.5rem, #efe8dc 100%);
+  background: linear-gradient(
+    180deg,
+    var(--color-app-shell-top) 0,
+    var(--color-app-shell-top) 10.5rem,
+    var(--color-app-shell-bottom) 10.5rem,
+    var(--color-app-shell-bottom) 100%
+  );
 }
 
 .frame {
   border-radius: 1.5rem;
   background:
-    radial-gradient(circle at top right, rgba(216, 146, 109, 0.16), transparent 28%),
-    radial-gradient(circle at left center, rgba(115, 151, 101, 0.12), transparent 24%),
+    radial-gradient(circle at top right, var(--color-frame-glow-clay), transparent 28%),
+    radial-gradient(circle at left center, var(--color-frame-glow-forest), transparent 24%),
     var(--color-paper);
   min-height: calc(100vh - 2.8rem);
   height: 100%;
@@ -30,9 +36,9 @@
 .error {
   padding: 1rem 1.2rem;
   border-radius: 1rem;
-  border: 1px solid rgba(139, 47, 47, 0.18);
-  background: rgba(139, 47, 47, 0.08);
-  color: #8b2f2f;
+  border: 1px solid var(--color-danger-border);
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
 }
 
 .topBanner {
@@ -43,8 +49,8 @@
   border-radius: 1rem;
   margin-bottom: 1rem;
   padding: 0.95rem 1.1rem;
-  border: 1px solid rgba(216, 146, 109, 0.28);
-  background: rgba(216, 146, 109, 0.12);
+  border: 1px solid var(--color-warning-border);
+  background: var(--color-warning-bg);
 }
 
 .topBannerTitle {

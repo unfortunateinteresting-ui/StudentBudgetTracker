@@ -55,6 +55,10 @@
   min-width: 0;
 }
 
+.sectionHeading {
+  margin: 0;
+}
+
 .table {
   width: 100%;
   border-collapse: collapse;
@@ -104,9 +108,9 @@
 }
 
 .dangerButton {
-  border: 1px solid rgba(139, 47, 47, 0.18);
-  background: rgba(139, 47, 47, 0.08);
-  color: #8b2f2f;
+  border: 1px solid var(--color-danger-border);
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
 }
 
 .filters {
@@ -134,7 +138,7 @@
   min-height: 2.85rem;
   border-radius: 0.9rem;
   border: 1px solid var(--color-border);
-  background: rgba(255, 255, 255, 0.8);
+  background: var(--color-surface-soft);
   padding: 0 0.9rem;
   font: inherit;
 }
@@ -143,7 +147,7 @@
   min-height: 7rem;
   border-radius: 0.9rem;
   border: 1px solid var(--color-border);
-  background: rgba(255, 255, 255, 0.8);
+  background: var(--color-surface-soft);
   padding: 0.9rem;
   font: inherit;
   resize: vertical;
@@ -151,8 +155,8 @@
 
 .banner {
   border-radius: 1rem;
-  border: 1px solid rgba(216, 146, 109, 0.35);
-  background: rgba(216, 146, 109, 0.12);
+  border: 1px solid var(--color-warning-border);
+  background: var(--color-warning-bg);
   padding: 1rem 1.1rem;
   display: flex;
   justify-content: space-between;
@@ -161,18 +165,18 @@
 }
 
 .bannerSuccess {
-  border-color: rgba(69, 118, 84, 0.28);
-  background: rgba(69, 118, 84, 0.1);
+  border-color: var(--color-success-border);
+  background: var(--color-success-bg);
 }
 
 .bannerDanger {
-  border-color: rgba(139, 47, 47, 0.24);
-  background: rgba(139, 47, 47, 0.1);
+  border-color: var(--color-danger-border-strong);
+  background: var(--color-danger-bg-strong);
 }
 
 .bannerWarning {
-  border-color: rgba(216, 146, 109, 0.35);
-  background: rgba(216, 146, 109, 0.12);
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-bg);
 }
 
 .kicker {
@@ -195,7 +199,7 @@
 .statBlock {
   border-radius: 1rem;
   border: 1px solid var(--color-border);
-  background: rgba(255, 255, 255, 0.52);
+  background: var(--color-surface-card);
   padding: 0.95rem;
 }
 
@@ -247,7 +251,7 @@
 }
 
 .negative {
-  color: #8b2f2f;
+  color: var(--color-danger);
 }
 
 .helperText {
@@ -255,6 +259,19 @@
   font-size: 0.9rem;
   margin-top: -0.35rem;
   overflow-wrap: anywhere;
+}
+
+.headerControl {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 11rem;
+}
+
+.controlLabel {
+  color: var(--color-muted);
+  font-size: 0.78rem;
+  line-height: 1;
 }
 
 .groupHeader {
@@ -274,7 +291,7 @@
 .groupTotal {
   border-radius: 999px;
   border: 1px solid var(--color-border);
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--color-surface-chip);
   padding: 0.35rem 0.75rem;
   font-size: 0.88rem;
 }
@@ -282,7 +299,7 @@
 .emptyPanel {
   border-radius: 1rem;
   border: 1px dashed var(--color-border);
-  background: rgba(255, 255, 255, 0.55);
+  background: var(--color-surface-muted);
   padding: 1.2rem;
   display: flex;
   flex-direction: column;
@@ -304,13 +321,13 @@
 }
 
 .badgeManual {
-  color: #815f15;
-  background: rgba(187, 145, 57, 0.12);
+  color: var(--color-badge-manual);
+  background: var(--color-badge-manual-bg);
 }
 
 .badgePaused {
   color: var(--color-muted);
-  background: rgba(33, 42, 54, 0.08);
+  background: var(--color-badge-paused-bg);
 }
 
 @media (max-width: 1080px) {
@@ -341,6 +358,10 @@
   }
   .filters {
     grid-template-columns: 1fr;
+  }
+  .headerControl {
+    min-width: 0;
+    width: 100%;
   }
   .statGrid {
     grid-template-columns: 1fr;

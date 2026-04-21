@@ -52,15 +52,15 @@ export function HomePage({ accounts, snapshot, onRefresh, onWhy }: HomePageProps
           value={`${currency(snapshot.this_month_spend)} / ${currency(snapshot.this_month_cap)}`}
         />
         <MetricCard
-          eyebrow="School year"
-          note="Money left after remaining fixed bills for the school year."
+          eyebrow="Planning"
+          note="Money left after remaining recurring bills in the planning window."
           onWhy={() => onWhy("school_year_runway_remaining")}
-          title="School-year balance"
+          title="Planning balance"
           value={currency(snapshot.school_year_runway_remaining)}
         />
         <MetricCard
-          eyebrow="School year"
-          note="Estimated balance after remaining bills and caps."
+          eyebrow="Planning"
+          note="Estimated balance after remaining bills and caps in the planning window."
           onWhy={() => onWhy("projected_end_of_year_cushion")}
           title="Projected end balance"
           value={currency(snapshot.projected_end_of_year_cushion)}

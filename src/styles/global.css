@@ -11,14 +11,19 @@ body,
 }
 
 html {
-  background: #24362b;
+  background: var(--color-html-bg);
+  color-scheme: light;
 }
 
 body {
   margin: 0;
   font-family: var(--font-ui);
   color: var(--color-ink);
-  background: #efe8dc;
+  background: var(--color-body-bg);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
 }
 
 button,

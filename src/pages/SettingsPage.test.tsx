@@ -52,7 +52,7 @@ describe("SettingsPage", () => {
     vi.mocked(dialogs.chooseJsonImportPath).mockResolvedValue(null);
   });
 
-  it("updates school-year and backup settings and refreshes derived state", async () => {
+  it("updates planning and backup settings and refreshes derived state", async () => {
     const user = userEvent.setup();
     const onRefresh = vi.fn().mockResolvedValue(undefined);
 
@@ -65,16 +65,15 @@ describe("SettingsPage", () => {
       />,
     );
 
-    await user.selectOptions(screen.getByLabelText("School-year start month"), "1");
-    await user.clear(screen.getByLabelText("School-year length in months"));
-    await user.type(screen.getByLabelText("School-year length in months"), "8");
+    await user.clear(screen.getByLabelText("Planning window in months"));
+    await user.type(screen.getByLabelText("Planning window in months"), "8");
     await user.clear(screen.getByLabelText("Backup retention copies"));
     await user.type(screen.getByLabelText("Backup retention copies"), "24");
     await user.click(screen.getByRole("button", { name: "Save settings" }));
 
     await waitFor(() => {
       expect(api.updateAppSettings).toHaveBeenCalledWith({
-        school_year_start_month: 1,
+        school_year_start_month: 9,
         school_year_months: 8,
         backup_retention: 24,
       });

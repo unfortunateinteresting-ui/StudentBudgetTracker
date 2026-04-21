@@ -11,6 +11,7 @@ import {
   updateAppSettings,
 } from "../lib/api";
 import { chooseJsonExportPath, chooseJsonImportPath } from "../lib/dialogs";
+import { currentMonthKey, monthLabel, shiftMonthKey } from "../lib/format";
 import type { AppSettings, BackupFile, MigrationStatus } from "../lib/types";
 import { MetricCard } from "../components/MetricCard";
 import { SectionCard } from "../components/SectionCard";
@@ -29,9 +30,6 @@ type NoticeState = {
   text: string;
 };
 
-const monthName = (month: number) =>
-  new Intl.DateTimeFormat("en-US", { month: "long" }).format(new Date(2024, month - 1, 1));
-
 export function SettingsPage({
   backups,
   migrationStatus,
@@ -44,37 +42,28 @@ export function SettingsPage({
   const [resetPhrase, setResetPhrase] = useState("");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [notice, setNotice] = useState<NoticeState | null>(null);
-  const [schoolYearStartMonth, setSchoolYearStartMonth] = useState(settings.school_year_start_month);
   const [schoolYearMonths, setSchoolYearMonths] = useState(settings.school_year_months);
   const [backupRetention, setBackupRetention] = useState(settings.backup_retention);
   const [pendingRestore, setPendingRestore] = useState<BackupFile | null>(null);
   const [restorePhrase, setRestorePhrase] = useState("");
 
   const recentBackups = useMemo(() => backups.slice(0, 10), [backups]);
-  const schoolYearEndMonth =
-    ((settings.school_year_start_month - 1 + settings.school_year_months - 1) % 12) + 1;
-  const formSchoolYearEndMonth = ((schoolYearStartMonth - 1 + schoolYearMonths - 1) % 12) + 1;
+  const currentMonth = currentMonthKey();
+  const planningWindowEnd = shiftMonthKey(currentMonth, settings.school_year_months - 1);
+  const formPlanningWindowEnd = shiftMonthKey(currentMonth, schoolYearMonths - 1);
   const settingsChanged =
-    schoolYearStartMonth !== settings.school_year_start_month ||
     schoolYearMonths !== settings.school_year_months ||
     backupRetention !== settings.backup_retention;
   const settingsValid =
-    schoolYearStartMonth >= 1 &&
-    schoolYearStartMonth <= 12 &&
     schoolYearMonths >= 1 &&
     schoolYearMonths <= 12 &&
     backupRetention >= 1 &&
     backupRetention <= 200;
 
   useEffect(() => {
-    setSchoolYearStartMonth(settings.school_year_start_month);
     setSchoolYearMonths(settings.school_year_months);
     setBackupRetention(settings.backup_retention);
-  }, [
-    settings.backup_retention,
-    settings.school_year_months,
-    settings.school_year_start_month,
-  ]);
+  }, [settings.backup_retention, settings.school_year_months]);
 
   const runAction = async (
     actionKey: string,
@@ -140,7 +129,7 @@ export function SettingsPage({
           <p className={styles.kicker}>Settings</p>
           <h1 className={styles.heroTitle}>Data and backups</h1>
           <p className={styles.heroText}>
-            Manage school-year settings, imports, backups, undo, and recovery tools.
+            Manage the planning window, imports, backups, undo, and recovery tools.
           </p>
         </div>
       </div>
@@ -166,11 +155,9 @@ export function SettingsPage({
 
       <div className={styles.grid3}>
         <MetricCard
-          eyebrow="School year"
-          note={`${monthName(settings.school_year_start_month)} to ${monthName(
-            schoolYearEndMonth,
-          )}.`}
-          title="School-year length"
+          eyebrow="Planning"
+          note={`${monthLabel(currentMonth)} to ${monthLabel(planningWindowEnd)}.`}
+          title="Planning window"
           value={`${settings.school_year_months} months`}
         />
         <MetricCard
@@ -188,25 +175,10 @@ export function SettingsPage({
       </div>
 
       <div className={styles.grid2}>
-        <SectionCard eyebrow="Planning controls" title="School-year and backup settings">
+        <SectionCard eyebrow="Planning controls" title="Planning and backup settings">
           <div className={styles.stack}>
             <label className={styles.field}>
-              <span>School-year start month</span>
-              <select
-                className={styles.select}
-                onChange={(event) => setSchoolYearStartMonth(Number(event.target.value))}
-                value={schoolYearStartMonth}
-              >
-                {Array.from({ length: 12 }, (_, index) => index + 1).map((month) => (
-                  <option key={month} value={month}>
-                    {monthName(month)}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className={styles.field}>
-              <span>School-year length in months</span>
+              <span>Planning window in months</span>
               <input
                 className={styles.input}
                 max={12}
@@ -231,8 +203,12 @@ export function SettingsPage({
 
             <div className={styles.summaryList}>
               <div className={styles.summaryRow}>
-                <span>Derived school-year end month</span>
-                <span className={styles.inlineValue}>{monthName(formSchoolYearEndMonth)}</span>
+                <span>Window starts</span>
+                <span className={styles.inlineValue}>{monthLabel(currentMonth)}</span>
+              </div>
+              <div className={styles.summaryRow}>
+                <span>Window ends</span>
+                <span className={styles.inlineValue}>{monthLabel(formPlanningWindowEnd)}</span>
               </div>
               <div className={styles.summaryRow}>
                 <span>Language</span>
@@ -245,7 +221,8 @@ export function SettingsPage({
             </div>
 
             <div className={styles.helperText}>
-              Changes here update school-year totals, charts, and backup pruning rules.
+              Forward totals and charts use recurring rules plus this planning window. If rent
+              continues through summer, extend the recurring rent rule to the contract end date.
             </div>
 
             <div className={styles.rowActions}>
@@ -257,7 +234,7 @@ export function SettingsPage({
                     "settings",
                     () =>
                       updateAppSettings({
-                        school_year_start_month: schoolYearStartMonth,
+                        school_year_start_month: settings.school_year_start_month,
                         school_year_months: schoolYearMonths,
                         backup_retention: backupRetention,
                       }),
@@ -272,7 +249,6 @@ export function SettingsPage({
                 className={styles.secondaryButton}
                 disabled={!settingsChanged || busyAction === "settings"}
                 onClick={() => {
-                  setSchoolYearStartMonth(settings.school_year_start_month);
                   setSchoolYearMonths(settings.school_year_months);
                   setBackupRetention(settings.backup_retention);
                 }}

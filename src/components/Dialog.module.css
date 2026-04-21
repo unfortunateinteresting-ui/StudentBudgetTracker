@@ -1,7 +1,7 @@
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(12, 15, 14, 0.55);
+  background: var(--color-backdrop);
   backdrop-filter: blur(10px);
 }
 
@@ -15,7 +15,7 @@
   border-radius: 1.25rem;
   border: 1px solid var(--color-border);
   background: var(--color-surface);
-  box-shadow: 0 35px 90px rgba(20, 20, 20, 0.24);
+  box-shadow: var(--shadow-dialog);
   padding: 1.25rem;
 }
 
@@ -44,7 +44,7 @@
   border: 1px solid var(--color-border);
   padding: 0.75rem 0.9rem;
   font: inherit;
-  background: rgba(255, 255, 255, 0.8);
+  background: var(--color-surface-soft);
 }
 
 .textarea {

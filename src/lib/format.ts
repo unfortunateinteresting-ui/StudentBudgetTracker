@@ -23,6 +23,13 @@ export const monthLabel = (monthKey: string) => {
   }).format(new Date(year, month - 1, 1));
 };
 
+export const shiftMonthKey = (monthKey: string, offset: number) => {
+  const [year, month] = monthKey.split("-").map(Number);
+  if (!year || !month) return monthKey;
+  const date = new Date(year, month - 1 + offset, 1);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+};
+
 export const localNowIso = () => {
   const now = new Date();
   const pad = (value: number) => String(value).padStart(2, "0");

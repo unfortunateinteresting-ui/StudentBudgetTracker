@@ -61,7 +61,25 @@ const monthlyCaps = [
     amount: 250,
     month_key: "2026-11",
   },
+  {
+    id: "cap-2",
+    category: "transport",
+    amount: 90,
+    month_key: "2026-10",
+  },
 ];
+
+const expenseEntry = (id: string, category: string, amount: number, occurredAt: string) => ({
+  id,
+  account_id: "account-1",
+  entry_kind: "expense" as const,
+  amount,
+  occurred_at_local: occurredAt,
+  label: `${category} spend`,
+  category,
+  notes: "",
+  exclude_from_insights: false,
+});
 
 const snapshot: InsightSnapshot = {
   total_available_cash: 1325,
@@ -77,8 +95,36 @@ const snapshot: InsightSnapshot = {
   recent_activity: [],
   account_balances: [],
   category_spend_this_month: [],
-  monthly_series: [],
-  activity_groups: [],
+  monthly_series: [
+    {
+      month_key: "2026-11",
+      spent: 180,
+      cap: 250,
+      runway_balance: 1145,
+    },
+    {
+      month_key: "2026-10",
+      spent: 60,
+      cap: 90,
+      runway_balance: 1235,
+    },
+  ],
+  activity_groups: [
+    {
+      month_key: "2026-11",
+      total_expense: 180,
+      total_funding: 0,
+      total_rent_credit: 0,
+      entries: [expenseEntry("entry-1", "food", 180, "2026-11-05T12:00:00")],
+    },
+    {
+      month_key: "2026-10",
+      total_expense: 60,
+      total_funding: 0,
+      total_rent_credit: 0,
+      entries: [expenseEntry("entry-2", "transport", 60, "2026-10-08T12:00:00")],
+    },
+  ],
   breakdowns: {},
 };
 
@@ -160,8 +206,11 @@ describe("PlanPage", () => {
       />,
     );
 
-    const capRow = screen
-      .getAllByText("Nov 2026")
+    const capSection = screen.getByText("Nov 2026 cap coverage").closest("section");
+    expect(capSection).not.toBeNull();
+
+    const capRow = within(capSection as HTMLElement)
+      .getAllByText("food")
       .map((node) => node.closest("tr"))
       .find((row) => row && within(row).queryByRole("button", { name: "Edit" }));
     expect(capRow).not.toBeNull();
@@ -226,5 +275,33 @@ describe("PlanPage", () => {
       );
     });
     expect(onRefresh).toHaveBeenCalled();
+  });
+
+  it("filters the cap table by selected month", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <PlanPage
+        accounts={accounts}
+        monthlyCaps={monthlyCaps}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+        onWhy={vi.fn()}
+        recurringRules={recurringRules}
+        settings={settings}
+        snapshot={snapshot}
+      />,
+    );
+
+    let capSection = screen.getByText("Nov 2026 cap coverage").closest("section");
+    expect(capSection).not.toBeNull();
+    expect(within(capSection as HTMLElement).getByText("food")).toBeInTheDocument();
+    expect(within(capSection as HTMLElement).queryByText("transport")).not.toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("Show month"), "2026-10");
+
+    capSection = screen.getByText("Oct 2026 cap coverage").closest("section");
+    expect(capSection).not.toBeNull();
+    expect(within(capSection as HTMLElement).getByText("transport")).toBeInTheDocument();
+    expect(within(capSection as HTMLElement).queryByText("food")).not.toBeInTheDocument();
   });
 });

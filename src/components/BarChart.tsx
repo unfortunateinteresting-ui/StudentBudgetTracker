@@ -83,7 +83,7 @@ export function BarChart({ data, color = "var(--color-clay)" }: BarChartProps) {
                         />
                         <text
                           dy="0.35em"
-                          fill="rgba(22, 24, 19, 0.84)"
+                          fill="var(--color-chart-label)"
                           fontFamily="IBM Plex Sans"
                           fontSize={11}
                           textAnchor="end"
@@ -94,7 +94,9 @@ export function BarChart({ data, color = "var(--color-clay)" }: BarChartProps) {
                         </text>
                         <text
                           dy="0.35em"
-                          fill={showInsideLabel ? "var(--color-surface)" : "rgba(22, 24, 19, 0.84)"}
+                          fill={
+                            showInsideLabel ? "var(--color-surface)" : "var(--color-chart-label)"
+                          }
                           fontFamily="IBM Plex Sans"
                           fontSize={11}
                           fontWeight={600}
