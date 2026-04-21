@@ -1,5 +1,0 @@
-# Copy to local.properties and set your Android SDK path.
-# Windows example:
-# sdk.dir=C\\:\\Users\\mouzzia\\AppData\\Local\\Android\\Sdk
-
-sdk.dir=C\\:\\Users\\<your_user>\\AppData\\Local\\Android\\Sdk
