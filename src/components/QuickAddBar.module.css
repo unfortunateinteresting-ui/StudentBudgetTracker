@@ -1,0 +1,40 @@
+.wrap {
+  display: grid;
+  grid-template-columns: 2fr minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.input,
+.select,
+.button {
+  min-height: 3rem;
+  border-radius: 0.95rem;
+  border: 1px solid var(--color-border);
+  font: inherit;
+}
+
+.input,
+.select {
+  background: rgba(255, 255, 255, 0.76);
+  padding: 0 0.95rem;
+}
+
+.button {
+  padding: 0 1.1rem;
+  background: var(--color-ink);
+  color: var(--color-surface);
+  cursor: pointer;
+}
+
+.help {
+  color: var(--color-muted);
+  font-size: 0.9rem;
+  margin-top: 0.5rem;
+}
+
+@media (max-width: 760px) {
+  .wrap {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Student Budget Tracker",
+  "mainBinaryName": "StudentBudgetTracker",
+  "version": "0.1.0",
+  "identifier": "com.mouzzia.studentbudgettracker",
+  "build": {
+    "beforeDevCommand": "corepack pnpm dev",
+    "beforeBuildCommand": "corepack pnpm build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist-web"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Student Budget Tracker",
+        "width": 1480,
+        "height": 980,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "capabilities": ["default"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "publisher": "Mouzzia",
+    "homepage": "https://github.com/unfortunateinteresting-ui/Offline_budget_tracker",
+    "copyright": "Copyright (c) 2026 Mouzzia",
+    "shortDescription": "Offline desktop budget tracker for student cash flow, recurring bills, rent tracking, and account balances.",
+    "longDescription": "Student Budget Tracker is a local-first Windows desktop app for tracking accounts, expenses, funding, rent credits, recurring bills, monthly caps, backups, and legacy budget history without relying on cloud sync.",
+    "targets": ["nsis"],
+    "icon": [
+      "../assets/app_icon.png",
+      "../assets/app_icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "../assets/app_icon.ico",
+        "startMenuFolder": "Mouzzia"
+      }
+    }
+  }
+}

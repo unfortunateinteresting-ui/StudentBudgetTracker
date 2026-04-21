@@ -1,0 +1,90 @@
+.sidebar {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  height: 100vh;
+  padding: 1.25rem 0.8rem;
+  overflow-y: auto;
+  background: linear-gradient(180deg, rgba(38, 54, 43, 0.95), rgba(29, 38, 33, 1));
+  color: var(--color-surface);
+  min-height: 100vh;
+}
+
+.brand {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid rgba(255, 248, 240, 0.12);
+  border-radius: 1rem;
+  background: rgba(255, 248, 240, 0.04);
+}
+
+.brandTitle {
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+  line-height: 1.05;
+}
+
+.brandSubtitle {
+  color: rgba(255, 248, 240, 0.75);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.button {
+  appearance: none;
+  display: block;
+  width: 100%;
+  border: 0;
+  text-align: left;
+  color: inherit;
+  background: rgba(255, 248, 240, 0.05);
+  border-radius: 0.9rem;
+  padding: 0.8rem 0.9rem;
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.button:hover {
+  background: rgba(255, 248, 240, 0.08);
+}
+
+.active {
+  background: linear-gradient(135deg, rgba(216, 146, 109, 0.9), rgba(115, 151, 101, 0.9));
+  border-color: rgba(255, 248, 240, 0.2);
+  color: #1b1d16;
+}
+
+.footer {
+  margin-top: auto;
+  padding: 0.75rem 0.85rem;
+  border-top: 1px solid rgba(255, 248, 240, 0.12);
+  color: rgba(255, 248, 240, 0.72);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+@media (max-width: 960px) {
+  .sidebar {
+    position: static;
+    align-self: stretch;
+    height: auto;
+    min-height: auto;
+    overflow: visible;
+  }
+}

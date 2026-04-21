@@ -1,0 +1,98 @@
+{
+  "settings": {
+    "starting_balance": 320.0,
+    "plan_months_total": 9,
+    "language": "EN",
+    "rent_monthly_manual": 125.0,
+    "rent_base_monthly": 650.0,
+    "food_house_monthly": 210.0,
+    "misc_monthly": 75.0,
+    "medical_monthly": 25.0,
+    "school_monthly": 90.0,
+    "household_monthly": 35.0,
+    "health_monthly": 20.0
+  },
+  "transactions": [
+    {
+      "id": "legacy-json-expense",
+      "datetime_local": "2026-03-05T09:30:00",
+      "amount": 42.0,
+      "type": "expense",
+      "label": "Groceries",
+      "category": "food",
+      "notes": "",
+      "excluded_from_averages": false
+    },
+    {
+      "id": "legacy-json-funding",
+      "datetime_local": "2026-03-06T11:00:00",
+      "amount": 500.0,
+      "type": "income",
+      "label": "Guarantor support",
+      "category": "income",
+      "notes": "",
+      "excluded_from_averages": false
+    },
+    {
+      "id": "legacy-json-rent-credit",
+      "datetime_local": "2026-03-07T18:30:00",
+      "amount": 275.0,
+      "type": "income",
+      "label": "Tenant share",
+      "category": "rent",
+      "notes": "Roommate rent",
+      "excluded_from_averages": true
+    },
+    {
+      "id": "legacy-json-adjustment",
+      "datetime_local": "2026-03-08T08:00:00",
+      "amount": 13.5,
+      "type": "expense",
+      "label": "Balance adjustment",
+      "category": "adjustment",
+      "notes": "Reconcile account",
+      "excluded_from_averages": false
+    }
+  ],
+  "recurring_charges": [
+    {
+      "id": "legacy-json-rec-expense",
+      "label": "Rent",
+      "amount": 650.0,
+      "type": "expense",
+      "category": "rent",
+      "notes": "",
+      "start_date": "2026-01-01",
+      "end_date": null,
+      "status": "automatic",
+      "frequency": "monthly",
+      "last_applied": "2026-03-01T00:00:00"
+    },
+    {
+      "id": "legacy-json-rec-funding",
+      "label": "Scholarship",
+      "amount": 700.0,
+      "type": "income",
+      "category": "income",
+      "notes": "Grant",
+      "start_date": "2026-01-01",
+      "end_date": null,
+      "status": "manual",
+      "frequency": "monthly",
+      "last_applied": null
+    },
+    {
+      "id": "legacy-json-rec-rent-credit",
+      "label": "Tenant contribution",
+      "amount": 300.0,
+      "type": "income",
+      "category": "rent",
+      "notes": "Room rent",
+      "start_date": "2026-01-01",
+      "end_date": null,
+      "status": "automatic",
+      "frequency": "monthly",
+      "last_applied": null
+    }
+  ]
+}

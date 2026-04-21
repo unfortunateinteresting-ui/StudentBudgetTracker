@@ -1,0 +1,12 @@
+:root {
+  --font-display: "Newsreader", Georgia, serif;
+  --font-ui: "IBM Plex Sans", "Segoe UI", sans-serif;
+  --color-paper: #f6efe4;
+  --color-surface: #fffbf5;
+  --color-border: rgba(34, 27, 21, 0.12);
+  --color-ink: #171914;
+  --color-muted: rgba(23, 25, 20, 0.65);
+  --color-clay: #d8926d;
+  --color-forest: #739765;
+  --shadow-soft: 0 20px 60px rgba(30, 28, 22, 0.08);
+}

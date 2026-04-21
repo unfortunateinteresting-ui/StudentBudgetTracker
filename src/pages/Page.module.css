@@ -1,0 +1,357 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  min-width: 0;
+}
+
+.hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 1rem;
+}
+
+.heroTitle {
+  font-family: var(--font-display);
+  font-size: clamp(2.4rem, 4vw, 4rem);
+  line-height: 0.98;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.heroText {
+  color: var(--color-muted);
+  max-width: 50rem;
+  margin-top: 0.6rem;
+  overflow-wrap: anywhere;
+}
+
+.grid2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  min-width: 0;
+}
+
+.grid3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  min-width: 0;
+}
+
+.grid4 {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem;
+  min-width: 0;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table th,
+.table td {
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.table th {
+  color: var(--color-muted);
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.rowActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.pillButton,
+.primaryButton,
+.dangerButton,
+.secondaryButton {
+  border-radius: 999px;
+  min-height: 2.6rem;
+  padding: 0 0.95rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.pillButton,
+.secondaryButton {
+  border: 1px solid var(--color-border);
+  background: transparent;
+}
+
+.primaryButton {
+  border: 0;
+  background: var(--color-ink);
+  color: var(--color-surface);
+}
+
+.dangerButton {
+  border: 1px solid rgba(139, 47, 47, 0.18);
+  background: rgba(139, 47, 47, 0.08);
+  color: #8b2f2f;
+}
+
+.filters {
+  display: grid;
+  grid-template-columns: 2fr repeat(2, minmax(0, 1fr)) auto;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.pathPicker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.input,
+.select {
+  min-height: 2.85rem;
+  border-radius: 0.9rem;
+  border: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.8);
+  padding: 0 0.9rem;
+  font: inherit;
+}
+
+.textarea {
+  min-height: 7rem;
+  border-radius: 0.9rem;
+  border: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.8);
+  padding: 0.9rem;
+  font: inherit;
+  resize: vertical;
+}
+
+.banner {
+  border-radius: 1rem;
+  border: 1px solid rgba(216, 146, 109, 0.35);
+  background: rgba(216, 146, 109, 0.12);
+  padding: 1rem 1.1rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.bannerSuccess {
+  border-color: rgba(69, 118, 84, 0.28);
+  background: rgba(69, 118, 84, 0.1);
+}
+
+.bannerDanger {
+  border-color: rgba(139, 47, 47, 0.24);
+  background: rgba(139, 47, 47, 0.1);
+}
+
+.bannerWarning {
+  border-color: rgba(216, 146, 109, 0.35);
+  background: rgba(216, 146, 109, 0.12);
+}
+
+.kicker {
+  color: var(--color-muted);
+  font-size: 0.88rem;
+  margin-bottom: 0.35rem;
+}
+
+.minor {
+  color: var(--color-muted);
+  font-size: 0.9rem;
+}
+
+.statGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.statBlock {
+  border-radius: 1rem;
+  border: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.52);
+  padding: 0.95rem;
+}
+
+.statLabel {
+  color: var(--color-muted);
+  font-size: 0.82rem;
+  margin-bottom: 0.35rem;
+}
+
+.statValue {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  line-height: 0.95;
+}
+
+.summaryList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.summaryRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.inlineValue {
+  font-weight: 600;
+  text-align: right;
+  max-width: 60%;
+  overflow-wrap: anywhere;
+}
+
+.tableWrap {
+  overflow-x: auto;
+}
+
+.emptyState {
+  color: var(--color-muted);
+  padding: 1rem 0;
+}
+
+.positive {
+  color: var(--color-forest);
+}
+
+.negative {
+  color: #8b2f2f;
+}
+
+.helperText {
+  color: var(--color-muted);
+  font-size: 0.9rem;
+  margin-top: -0.35rem;
+  overflow-wrap: anywhere;
+}
+
+.groupHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.groupTotals {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.groupTotal {
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.7);
+  padding: 0.35rem 0.75rem;
+  font-size: 0.88rem;
+}
+
+.emptyPanel {
+  border-radius: 1rem;
+  border: 1px dashed var(--color-border);
+  background: rgba(255, 255, 255, 0.55);
+  padding: 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.badgeAutomatic {
+  color: var(--color-forest);
+  background: rgba(69, 118, 84, 0.12);
+}
+
+.badgeManual {
+  color: #815f15;
+  background: rgba(187, 145, 57, 0.12);
+}
+
+.badgePaused {
+  color: var(--color-muted);
+  background: rgba(33, 42, 54, 0.08);
+}
+
+@media (max-width: 1080px) {
+  .grid4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .grid3 {
+    grid-template-columns: 1fr;
+  }
+  .grid2 {
+    grid-template-columns: 1fr;
+  }
+  .statGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .pathPicker {
+    grid-template-columns: 1fr;
+  }
+  .grid4 {
+    grid-template-columns: 1fr;
+  }
+  .hero {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .filters {
+    grid-template-columns: 1fr;
+  }
+  .statGrid {
+    grid-template-columns: 1fr;
+  }
+  .summaryRow {
+    flex-direction: column;
+  }
+  .groupHeader {
+    flex-direction: column;
+  }
+  .groupTotals {
+    justify-content: flex-start;
+  }
+}
