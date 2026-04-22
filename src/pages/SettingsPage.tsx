@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   createBackupNow,
@@ -98,6 +98,38 @@ export function SettingsPage({
     schoolYearMonths <= 12 &&
     backupRetention >= 1 &&
     backupRetention <= 200;
+  const singleDetectedPeer = discoveredPeers.length === 1 ? discoveredPeers[0] : null;
+
+  const refreshLanPeers = useCallback(
+    async (silent = false) => {
+      if (!silent) {
+        setBusyAction("lan-discover");
+      }
+      try {
+        const peers = await discoverLanPeers();
+        setDiscoveredPeers(peers);
+        if (!silent) {
+          setNotice({
+            kind: "success",
+            text: peers.length
+              ? `Found ${peers.length} device(s) on the local network.`
+              : "No student budget tracker devices responded on the local network.",
+          });
+        }
+        return peers;
+      } catch (error) {
+        if (!silent) {
+          setNotice({ kind: "error", text: String(error) });
+        }
+        return [];
+      } finally {
+        if (!silent) {
+          setBusyAction(null);
+        }
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     setPlanningStartMonthKey(settings.planning_start_month_key);
@@ -118,6 +150,14 @@ export function SettingsPage({
       setManualLanPort(String(localSync.lan_sync_port));
     }
   }, [localSync.lan_sync_port]);
+
+  useEffect(() => {
+    if (!localSync.lan_direct_available) {
+      setDiscoveredPeers([]);
+      return;
+    }
+    void refreshLanPeers(true);
+  }, [localSync.lan_direct_available, refreshLanPeers]);
 
   const runAction = async (
     actionKey: string,
@@ -246,21 +286,7 @@ export function SettingsPage({
   };
 
   const handleDiscoverLanPeers = async () => {
-    setBusyAction("lan-discover");
-    try {
-      const peers = await discoverLanPeers();
-      setDiscoveredPeers(peers);
-      setNotice({
-        kind: "success",
-        text: peers.length
-          ? `Found ${peers.length} device(s) on the local network.`
-          : "No student budget tracker devices responded on the local network.",
-      });
-    } catch (error) {
-      setNotice({ kind: "error", text: String(error) });
-    } finally {
-      setBusyAction(null);
-    }
+    await refreshLanPeers(false);
   };
 
   const handleLanSync = async (address: string, port: number) => {
@@ -272,6 +298,7 @@ export function SettingsPage({
         text: `Synced ${result.sent_operations} queued operations to ${result.peer_device_name}. Peer imported ${result.peer_imported_operations} new operations.`,
       });
       await onRefresh();
+      await refreshLanPeers(true);
     } catch (error) {
       setNotice({ kind: "error", text: String(error) });
     } finally {
@@ -501,7 +528,7 @@ export function SettingsPage({
       </div>
 
       <div className={styles.grid2}>
-        <SectionCard eyebrow="Local sync" title="Device and packet exchange">
+        <SectionCard eyebrow="Local sync" title="Sync between devices">
           <div className={styles.stack}>
             <label className={styles.field}>
               <span>Device name</span>
@@ -569,58 +596,7 @@ export function SettingsPage({
               </div>
             </div>
 
-            <div className={styles.helperText}>
-              Export a sync packet, move it with LocalSend, a shared folder, Bluetooth, or USB,
-              then import it on the other device. The app records trusted devices and skips
-              duplicate operations automatically.
-            </div>
-
-            <div className={styles.helperText}>
-              Drop received sync packets into the inbox folder. The app scans that folder on
-              startup and while it stays open, and `Scan inbox now` is available if you want to
-              force it immediately. Successful imports are archived and failed files go to a
-              separate failure folder.
-            </div>
-
-            <div className={styles.helperText}>
-              Direct LAN sync uses local network discovery plus a built-in listener. If discovery
-              misses a device, use the manual address fields below.
-            </div>
-
-            <div className={styles.helperText}>
-              For manual sync, enter the other computer's Wi-Fi IPv4 address. This device currently
-              reports:{" "}
-              {localSync.local_ipv4_addresses.length
-                ? localSync.local_ipv4_addresses.join(", ")
-                : "no local IPv4 addresses detected"}.
-            </div>
-
-            {localSync.localsend_path ? (
-              <div className={styles.helperText}>LocalSend path: {localSync.localsend_path}</div>
-            ) : null}
-
-            <div className={styles.helperText}>Sync inbox: {localSync.sync_inbox_path}</div>
-            <div className={styles.helperText}>Sync archive: {localSync.sync_archive_path}</div>
-            <div className={styles.helperText}>Sync failed: {localSync.sync_failed_path}</div>
-
-            <div className={styles.helperText}>
-              LocalSend is launch-assisted here: the app exports the packet, opens LocalSend, and
-              reveals the file in Explorer so you can send it to the selected device.
-            </div>
-
-            {localSync.last_error ? (
-              <div className={styles.helperText}>Last sync error: {localSync.last_error}</div>
-            ) : null}
-
             <div className={styles.rowActions}>
-              <button
-                className={styles.primaryButton}
-                disabled={!localSync.localsend_available || busyAction === "localsend"}
-                onClick={() => void handleExportForLocalSend()}
-                type="button"
-              >
-                Export and open LocalSend
-              </button>
               <button
                 className={styles.primaryButton}
                 disabled={!deviceName.trim() || !deviceNameChanged || busyAction === "device"}
@@ -640,205 +616,298 @@ export function SettingsPage({
               </button>
               <button
                 className={styles.secondaryButton}
-                disabled={busyAction === "sync-inbox-process"}
-                onClick={() => void handleProcessSyncInbox()}
-                type="button"
-              >
-                Scan inbox now
-              </button>
-              <button
-                className={styles.secondaryButton}
-                disabled={busyAction === "sync-inbox-open"}
-                onClick={() => void handleOpenSyncInbox()}
-                type="button"
-              >
-                Open sync inbox
-              </button>
-              <button
-                className={styles.secondaryButton}
                 disabled={!deviceNameChanged || busyAction === "device"}
                 onClick={() => setDeviceName(localSync.device_name)}
                 type="button"
               >
                 Reset device name
               </button>
-              <button
-                className={styles.secondaryButton}
-                disabled={!localSync.lan_direct_available || busyAction === "lan-discover"}
-                onClick={() => void handleDiscoverLanPeers()}
-                type="button"
-              >
-                Scan network
-              </button>
             </div>
 
-            <div className={styles.tableWrap}>
-              <table className={styles.table}>
-                <thead>
-                  <tr>
-                    <th>Trusted device</th>
-                    <th>Paired</th>
-                    <th>Last seen</th>
-                    <th>Last sync</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {localSync.trusted_peers.length ? (
-                    localSync.trusted_peers.map((peer) => (
-                      <tr key={peer.peer_device_id}>
-                        <td>{peer.device_name}</td>
-                        <td>{peer.paired_at_utc}</td>
-                        <td>{peer.last_seen_at_utc ?? "Never"}</td>
-                        <td>{peer.last_sync_at_utc ?? "Never"}</td>
-                      </tr>
-                    ))
-                  ) : (
+            <div className={styles.subsection}>
+              <div className={styles.subsectionHeader}>
+                <div className={styles.stackCompact}>
+                  <h2 className={styles.subsectionTitle}>Send updates to another device</h2>
+                  <div className={styles.helperText}>
+                    This page now looks for nearby devices automatically. When one appears below,
+                    click <strong>Send updates</strong> on this device to push your latest data to
+                    it.
+                  </div>
+                  {singleDetectedPeer ? (
+                    <div className={styles.helperText}>
+                      Quick target found: <strong>{singleDetectedPeer.device_name}</strong>.
+                    </div>
+                  ) : null}
+                </div>
+                <button
+                  className={styles.secondaryButton}
+                  disabled={!localSync.lan_direct_available || busyAction === "lan-discover"}
+                  onClick={() => void handleDiscoverLanPeers()}
+                  type="button"
+                >
+                  Refresh devices
+                </button>
+              </div>
+
+              {discoveredPeers.length ? (
+                <div className={styles.deviceGrid}>
+                  {discoveredPeers.map((peer) => (
+                    <div
+                      className={styles.deviceCard}
+                      key={`${peer.device_id}-${peer.address}-${peer.port}`}
+                    >
+                      <div className={styles.deviceCardHeader}>
+                        <div className={styles.stackCompact}>
+                          <div className={styles.deviceCardTitle}>{peer.device_name}</div>
+                          <div className={styles.minor}>
+                            {peer.address}:{peer.port}
+                          </div>
+                        </div>
+                        <span
+                          className={`${styles.deviceStatus} ${
+                            peer.trusted ? styles.deviceStatusTrusted : styles.deviceStatusDetected
+                          }`}
+                        >
+                          {peer.trusted ? "Trusted" : "Detected"}
+                        </span>
+                      </div>
+                      <div className={styles.deviceMeta}>
+                        <div className={styles.deviceMetaRow}>
+                          <span>Status</span>
+                          <span>
+                            {peer.trusted
+                              ? peer.last_sync_at_utc
+                                ? "Seen before"
+                                : "Trusted"
+                              : "Ready for first sync"}
+                          </span>
+                        </div>
+                        <div className={styles.deviceMetaRow}>
+                          <span>Last sync</span>
+                          <span>{peer.last_sync_at_utc ?? "Never"}</span>
+                        </div>
+                      </div>
+                      <div className={styles.rowActions}>
+                        <button
+                          className={styles.primaryButton}
+                          disabled={busyAction === "lan-sync"}
+                          onClick={() => void handleLanSync(peer.address, peer.port)}
+                          type="button"
+                        >
+                          Send updates
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className={styles.emptyPanel}>
+                  <strong>No detected devices yet</strong>
+                  <div className={styles.minor}>
+                    Keep the app open on the other device, then click <strong>Refresh devices</strong>.
+                  </div>
+                  <div className={styles.minor}>
+                    If nothing appears, use the manual address fallback below.
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className={styles.subsection}>
+              <div className={styles.stackCompact}>
+                <h2 className={styles.subsectionTitle}>Manual address fallback</h2>
+                <div className={styles.helperText}>
+                  Use this only when the other device does not show above. Enter the receiving
+                  device's Wi-Fi IPv4 address. This device currently reports:{" "}
+                  {localSync.local_ipv4_addresses.length
+                    ? localSync.local_ipv4_addresses.join(", ")
+                    : "no local IPv4 addresses detected"}
+                  .
+                </div>
+              </div>
+              <div className={styles.pathPicker}>
+                <input
+                  aria-label="Manual LAN address"
+                  className={styles.input}
+                  onChange={(event) => setManualLanAddress(event.target.value)}
+                  placeholder="192.168.1.24"
+                  value={manualLanAddress}
+                />
+                <input
+                  aria-label="Manual LAN port"
+                  className={styles.input}
+                  onChange={(event) => setManualLanPort(event.target.value)}
+                  placeholder="38256"
+                  type="number"
+                  value={manualLanPort}
+                />
+              </div>
+              <div className={styles.rowActions}>
+                <button
+                  className={styles.secondaryButton}
+                  disabled={
+                    !manualLanAddress.trim() ||
+                    !manualLanPort.trim() ||
+                    Number(manualLanPort) <= 0 ||
+                    busyAction === "lan-sync"
+                  }
+                  onClick={() =>
+                    void handleLanSync(manualLanAddress.trim(), Number(manualLanPort))
+                  }
+                  type="button"
+                >
+                  Send to address
+                </button>
+              </div>
+            </div>
+
+            <div className={styles.subsection}>
+              <div className={styles.stackCompact}>
+                <h2 className={styles.subsectionTitle}>Trusted devices</h2>
+                <div className={styles.helperText}>
+                  These are devices that have already synced with this one before.
+                </div>
+              </div>
+              <div className={styles.tableWrap}>
+                <table className={styles.table}>
+                  <thead>
                     <tr>
-                      <td className={styles.emptyState} colSpan={4}>
-                        No trusted devices yet.
-                      </td>
+                      <th>Trusted device</th>
+                      <th>Paired</th>
+                      <th>Last seen</th>
+                      <th>Last sync</th>
                     </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-
-            <div className={styles.pathPicker}>
-              <input
-                aria-label="Export sync packet path"
-                className={styles.input}
-                onChange={(event) => setSyncExportPath(event.target.value)}
-                placeholder="C:\\Path\\To\\student-budget-sync.json"
-                value={syncExportPath}
-              />
-              <button
-                className={styles.secondaryButton}
-                disabled={busyAction === "sync-export"}
-                onClick={() => void handleChooseSyncExportPath()}
-                type="button"
-              >
-                Choose packet export location
-              </button>
-            </div>
-
-            <div className={styles.rowActions}>
-              <button
-                className={styles.primaryButton}
-                disabled={!syncExportPath.trim() || busyAction === "sync-export"}
-                onClick={() => void handleExportSyncPacket()}
-                type="button"
-              >
-                Export sync packet
-              </button>
-            </div>
-
-            <div className={styles.pathPicker}>
-              <input
-                aria-label="Import sync packet path"
-                className={styles.input}
-                onChange={(event) => setSyncImportPath(event.target.value)}
-                placeholder="C:\\Path\\To\\student-budget-sync.json"
-                value={syncImportPath}
-              />
-              <button
-                className={styles.secondaryButton}
-                disabled={busyAction === "sync-import"}
-                onClick={() => void handleChooseSyncImportPath()}
-                type="button"
-              >
-                Choose sync packet file
-              </button>
-            </div>
-
-            <div className={styles.rowActions}>
-              <button
-                className={styles.secondaryButton}
-                disabled={!syncImportPath.trim() || busyAction === "sync-import"}
-                onClick={() => void handleImportSyncPacket()}
-                type="button"
-              >
-                Import sync packet
-              </button>
-            </div>
-
-            <div className={styles.tableWrap}>
-              <table className={styles.table}>
-                <thead>
-                  <tr>
-                    <th>LAN device</th>
-                    <th>Address</th>
-                    <th>Status</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {discoveredPeers.length ? (
-                    discoveredPeers.map((peer) => (
-                      <tr key={`${peer.device_id}-${peer.address}-${peer.port}`}>
-                        <td>{peer.device_name}</td>
-                        <td>
-                          {peer.address}:{peer.port}
-                        </td>
-                        <td>
-                          {peer.trusted
-                            ? `Trusted${peer.last_sync_at_utc ? `, last sync ${peer.last_sync_at_utc}` : ""}`
-                            : "New device"}
-                        </td>
-                        <td>
-                          <button
-                            className={styles.secondaryButton}
-                            disabled={busyAction === "lan-sync"}
-                            onClick={() => void handleLanSync(peer.address, peer.port)}
-                            type="button"
-                          >
-                            Sync now
-                          </button>
+                  </thead>
+                  <tbody>
+                    {localSync.trusted_peers.length ? (
+                      localSync.trusted_peers.map((peer) => (
+                        <tr key={peer.peer_device_id}>
+                          <td>{peer.device_name}</td>
+                          <td>{peer.paired_at_utc}</td>
+                          <td>{peer.last_seen_at_utc ?? "Never"}</td>
+                          <td>{peer.last_sync_at_utc ?? "Never"}</td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td className={styles.emptyState} colSpan={4}>
+                          No trusted devices yet.
                         </td>
                       </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td className={styles.emptyState} colSpan={4}>
-                        Scan the local network to find other student budget tracker devices.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
 
-            <div className={styles.pathPicker}>
-              <input
-                aria-label="Manual LAN address"
-                className={styles.input}
-                onChange={(event) => setManualLanAddress(event.target.value)}
-                placeholder="192.168.1.24"
-                value={manualLanAddress}
-              />
-              <input
-                aria-label="Manual LAN port"
-                className={styles.input}
-                onChange={(event) => setManualLanPort(event.target.value)}
-                placeholder="38256"
-                type="number"
-                value={manualLanPort}
-              />
-            </div>
+            <div className={styles.subsection}>
+              <div className={styles.stackCompact}>
+                <h2 className={styles.subsectionTitle}>Packet and LocalSend fallback</h2>
+                <div className={styles.helperText}>
+                  Use packet export and import only if direct device-to-device sync is not working.
+                </div>
+                <div className={styles.helperText}>
+                  Drop received sync packets into the inbox folder. The app scans that folder on
+                  startup and while it stays open, and <strong>Scan inbox now</strong> forces it
+                  immediately.
+                </div>
+                {localSync.localsend_path ? (
+                  <div className={styles.helperText}>
+                    LocalSend path: {localSync.localsend_path}
+                  </div>
+                ) : null}
+                <div className={styles.helperText}>Sync inbox: {localSync.sync_inbox_path}</div>
+                <div className={styles.helperText}>Sync archive: {localSync.sync_archive_path}</div>
+                <div className={styles.helperText}>Sync failed: {localSync.sync_failed_path}</div>
+                {localSync.last_error ? (
+                  <div className={styles.helperText}>Last sync error: {localSync.last_error}</div>
+                ) : null}
+              </div>
 
-            <div className={styles.rowActions}>
-              <button
-                className={styles.secondaryButton}
-                disabled={
-                  !manualLanAddress.trim() ||
-                  !manualLanPort.trim() ||
-                  Number(manualLanPort) <= 0 ||
-                  busyAction === "lan-sync"
-                }
-                onClick={() => void handleLanSync(manualLanAddress.trim(), Number(manualLanPort))}
-                type="button"
-              >
-                Sync to address
-              </button>
+              <div className={styles.rowActions}>
+                <button
+                  className={styles.primaryButton}
+                  disabled={!localSync.localsend_available || busyAction === "localsend"}
+                  onClick={() => void handleExportForLocalSend()}
+                  type="button"
+                >
+                  Export and open LocalSend
+                </button>
+                <button
+                  className={styles.secondaryButton}
+                  disabled={busyAction === "sync-inbox-process"}
+                  onClick={() => void handleProcessSyncInbox()}
+                  type="button"
+                >
+                  Scan inbox now
+                </button>
+                <button
+                  className={styles.secondaryButton}
+                  disabled={busyAction === "sync-inbox-open"}
+                  onClick={() => void handleOpenSyncInbox()}
+                  type="button"
+                >
+                  Open sync inbox
+                </button>
+              </div>
+
+              <div className={styles.pathPicker}>
+                <input
+                  aria-label="Export sync packet path"
+                  className={styles.input}
+                  onChange={(event) => setSyncExportPath(event.target.value)}
+                  placeholder="C:\\Path\\To\\student-budget-sync.json"
+                  value={syncExportPath}
+                />
+                <button
+                  className={styles.secondaryButton}
+                  disabled={busyAction === "sync-export"}
+                  onClick={() => void handleChooseSyncExportPath()}
+                  type="button"
+                >
+                  Choose packet export location
+                </button>
+              </div>
+
+              <div className={styles.rowActions}>
+                <button
+                  className={styles.primaryButton}
+                  disabled={!syncExportPath.trim() || busyAction === "sync-export"}
+                  onClick={() => void handleExportSyncPacket()}
+                  type="button"
+                >
+                  Export sync packet
+                </button>
+              </div>
+
+              <div className={styles.pathPicker}>
+                <input
+                  aria-label="Import sync packet path"
+                  className={styles.input}
+                  onChange={(event) => setSyncImportPath(event.target.value)}
+                  placeholder="C:\\Path\\To\\student-budget-sync.json"
+                  value={syncImportPath}
+                />
+                <button
+                  className={styles.secondaryButton}
+                  disabled={busyAction === "sync-import"}
+                  onClick={() => void handleChooseSyncImportPath()}
+                  type="button"
+                >
+                  Choose sync packet file
+                </button>
+              </div>
+
+              <div className={styles.rowActions}>
+                <button
+                  className={styles.secondaryButton}
+                  disabled={!syncImportPath.trim() || busyAction === "sync-import"}
+                  onClick={() => void handleImportSyncPacket()}
+                  type="button"
+                >
+                  Import sync packet
+                </button>
+              </div>
             </div>
           </div>
         </SectionCard>

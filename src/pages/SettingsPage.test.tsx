@@ -496,9 +496,7 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Imported 2 sync operations from Dorm desktop.")).toBeInTheDocument();
   });
 
-  it("discovers LAN peers and shows them in the local sync table", async () => {
-    const user = userEvent.setup();
-
+  it("auto-discovers LAN peers and shows send actions for them", async () => {
     render(
       <SettingsPage
         backups={[]}
@@ -509,15 +507,40 @@ describe("SettingsPage", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Scan network" }));
-
     await waitFor(() => {
       expect(api.discoverLanPeers).toHaveBeenCalled();
     });
-    expect(screen.getByText("Found 1 device(s) on the local network.")).toBeInTheDocument();
-    expect(screen.getByText("Dorm desktop")).toBeInTheDocument();
+    expect(screen.getAllByText("Dorm desktop").length).toBeGreaterThan(0);
     expect(screen.getByText("192.168.1.44:38256")).toBeInTheDocument();
-    expect(screen.getByText(/Trusted, last sync 2026-04-21T10:00:00/i)).toBeInTheDocument();
+    expect(screen.getByText("Seen before")).toBeInTheDocument();
+    expect(screen.getByText("2026-04-21T10:00:00")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send updates" })).toBeInTheDocument();
+  });
+
+  it("sends updates to a detected device and refreshes state", async () => {
+    const user = userEvent.setup();
+    const onRefresh = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <SettingsPage
+        backups={[]}
+        localSync={localSync}
+        migrationStatus={migrationStatus}
+        onRefresh={onRefresh}
+        settings={settings}
+      />,
+    );
+
+    await screen.findByRole("button", { name: "Send updates" });
+    await user.click(screen.getByRole("button", { name: "Send updates" }));
+
+    await waitFor(() => {
+      expect(api.syncWithLanPeer).toHaveBeenCalledWith({
+        address: "192.168.1.44",
+        port: 38256,
+      });
+    });
+    expect(onRefresh).toHaveBeenCalled();
   });
 
   it("syncs with a manual LAN address and refreshes state", async () => {
@@ -538,7 +561,7 @@ describe("SettingsPage", () => {
     await user.type(screen.getByLabelText("Manual LAN address"), "192.168.1.77");
     await user.clear(screen.getByLabelText("Manual LAN port"));
     await user.type(screen.getByLabelText("Manual LAN port"), "38256");
-    await user.click(screen.getByRole("button", { name: "Sync to address" }));
+    await user.click(screen.getByRole("button", { name: "Send to address" }));
 
     await waitFor(() => {
       expect(api.syncWithLanPeer).toHaveBeenCalledWith({
