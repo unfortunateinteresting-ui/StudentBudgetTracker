@@ -31,7 +31,7 @@ export function LineChart({ data }: LineChartProps) {
   const tickLegend = [
     { label: "Spent", color: "var(--color-clay)" },
     { label: "Cap", color: "var(--color-forest)" },
-    { label: "Projected balance", color: "var(--color-ink)" },
+    { label: "End balance", color: "var(--color-ink)" },
   ];
 
   return (

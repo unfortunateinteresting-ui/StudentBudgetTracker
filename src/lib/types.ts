@@ -66,6 +66,7 @@ export interface MonthlyCap {
 
 export interface AppSettings {
   school_year_start_month: number;
+  planning_start_month_key: string;
   school_year_months: number;
   language: string;
   backup_retention: number;
@@ -141,6 +142,88 @@ export interface MigrationStatus {
   last_run_at?: string | null;
 }
 
+export interface SyncPeerSummary {
+  peer_device_id: string;
+  device_name: string;
+  paired_at_utc: string;
+  last_seen_at_utc?: string | null;
+  last_sync_at_utc?: string | null;
+}
+
+export interface LocalSyncState {
+  device_id: string;
+  device_name: string;
+  pending_operations: number;
+  inbox_packet_count: number;
+  trusted_peers: SyncPeerSummary[];
+  last_sync_at_utc?: string | null;
+  last_error?: string | null;
+  transport_mode: string;
+  localsend_available: boolean;
+  localsend_path?: string | null;
+  inbox_watch_active: boolean;
+  lan_direct_available: boolean;
+  lan_sync_port?: number | null;
+  sync_inbox_path: string;
+  sync_archive_path: string;
+  sync_failed_path: string;
+}
+
+export interface SyncPacketExportResult {
+  path: string;
+  operation_count: number;
+}
+
+export interface SyncPacketImportResult {
+  source_device_id: string;
+  source_device_name: string;
+  imported_operations: number;
+  skipped_operations: number;
+  trusted_peer_added: boolean;
+}
+
+export interface SyncPacketLaunchResult {
+  path: string;
+  operation_count: number;
+  localsend_path: string;
+  explorer_revealed: boolean;
+}
+
+export interface SyncInboxProcessResult {
+  inbox_path: string;
+  archive_path: string;
+  failed_path: string;
+  scanned_files: number;
+  processed_files: number;
+  failed_files: number;
+  imported_operations: number;
+  skipped_operations: number;
+}
+
+export interface LanPeerCandidate {
+  device_id: string;
+  device_name: string;
+  address: string;
+  port: number;
+  trusted: boolean;
+  last_sync_at_utc?: string | null;
+}
+
+export interface LanSyncSendInput {
+  address: string;
+  port: number;
+}
+
+export interface LanSyncSendResult {
+  peer_device_id: string;
+  peer_device_name: string;
+  address: string;
+  port: number;
+  sent_operations: number;
+  peer_imported_operations: number;
+  peer_skipped_operations: number;
+}
+
 export interface BootstrapState {
   accounts: Account[];
   entries: LedgerEntry[];
@@ -150,6 +233,7 @@ export interface BootstrapState {
   insight_snapshot: InsightSnapshot;
   backup_files: BackupFile[];
   migration_status: MigrationStatus;
+  local_sync: LocalSyncState;
   recovery_notice?: string | null;
 }
 
@@ -244,7 +328,11 @@ export interface MonthlyCapInput {
 }
 
 export interface UpdateSettingsInput {
-  school_year_start_month: number;
+  planning_start_month_key: string;
   school_year_months: number;
   backup_retention: number;
+}
+
+export interface UpdateLocalSyncDeviceNameInput {
+  device_name: string;
 }

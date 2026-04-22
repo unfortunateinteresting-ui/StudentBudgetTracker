@@ -3,17 +3,23 @@ mod models;
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::{Read, Write},
+    net::{Shutdown, TcpListener, TcpStream, UdpSocket},
     path::{Path, PathBuf},
-    sync::Mutex,
+    process::Command,
+    sync::{mpsc, Mutex},
+    thread,
+    time::Duration as StdDuration,
 };
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use models::*;
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tauri::{Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 const APP_NAME: &str = "StudentBudgetTracker";
@@ -23,6 +29,12 @@ const DEFAULT_BACKUP_RETENTION: u32 = 50;
 const CURRENT_MIGRATION_VERSION: u32 = 2;
 const DEFAULT_SCHOOL_YEAR_START_MONTH: u32 = 9;
 const DEFAULT_SCHOOL_YEAR_MONTHS: u32 = 9;
+const SYNC_PACKET_APP_NAME: &str = "StudentBudgetTrackerSync";
+const SYNC_PACKET_SCHEMA_VERSION: u32 = 1;
+const SYNC_DISCOVERY_PORT: u16 = 38255;
+const SYNC_LAN_PORT: u16 = 38256;
+const SYNC_EVENT_UPDATED: &str = "sync-updated";
+const SYNC_EVENT_ATTENTION: &str = "sync-attention";
 
 const INIT_SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS app_meta (
@@ -33,6 +45,7 @@ CREATE TABLE IF NOT EXISTS app_meta (
 CREATE TABLE IF NOT EXISTS app_settings (
   singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
   school_year_start_month INTEGER NOT NULL DEFAULT 9,
+  planning_start_month_key TEXT NOT NULL DEFAULT '',
   school_year_months INTEGER NOT NULL DEFAULT 9,
   language TEXT NOT NULL DEFAULT 'EN',
   backup_retention INTEGER NOT NULL DEFAULT 50,
@@ -88,11 +101,47 @@ CREATE TABLE IF NOT EXISTS monthly_caps (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sync_device (
+  singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+  device_id TEXT NOT NULL,
+  device_name TEXT NOT NULL,
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sync_peers (
+  peer_device_id TEXT PRIMARY KEY,
+  device_name TEXT NOT NULL,
+  paired_at_utc TEXT NOT NULL,
+  last_seen_at_utc TEXT,
+  fingerprint TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS sync_peer_state (
+  peer_device_id TEXT PRIMARY KEY,
+  last_sent_seq INTEGER NOT NULL DEFAULT 0,
+  last_received_seq INTEGER NOT NULL DEFAULT 0,
+  last_sync_at_utc TEXT,
+  last_error TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY(peer_device_id) REFERENCES sync_peers(peer_device_id)
+);
+
+CREATE TABLE IF NOT EXISTS sync_outbox (
+  op_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  device_id TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  operation_type TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at_utc TEXT NOT NULL
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_monthly_caps_unique ON monthly_caps(category, month_key);
 CREATE INDEX IF NOT EXISTS idx_entries_account ON ledger_entries(account_id);
 CREATE INDEX IF NOT EXISTS idx_entries_occurred ON ledger_entries(occurred_at_local);
 CREATE INDEX IF NOT EXISTS idx_entries_recurring ON ledger_entries(recurring_rule_id);
 CREATE INDEX IF NOT EXISTS idx_recurring_status ON recurring_rules(status, start_date);
+CREATE INDEX IF NOT EXISTS idx_sync_outbox_device_seq ON sync_outbox(device_id, op_seq);
 "#;
 
 type AppResult<T> = Result<T>;
@@ -110,6 +159,9 @@ struct RuntimeState {
     validated: bool,
     recovery_notice: Option<String>,
     undo_stack: Vec<UndoAction>,
+    inbox_watch_active: bool,
+    lan_direct_available: bool,
+    lan_sync_port: Option<u16>,
 }
 
 #[derive(Debug)]
@@ -182,6 +234,43 @@ enum UndoAction {
     },
 }
 
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+struct LanDiscoveryRequest {
+    app: String,
+    schema_version: u32,
+    request_id: String,
+    response_port: u16,
+    source: SyncDeviceIdentity,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+struct LanDiscoveryResponse {
+    app: String,
+    schema_version: u32,
+    request_id: String,
+    source: SyncDeviceIdentity,
+    sync_port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+struct LanSyncRequest {
+    app: String,
+    schema_version: u32,
+    packet: SyncPacket,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+struct LanSyncResponse {
+    app: String,
+    schema_version: u32,
+    ok: bool,
+    error: Option<String>,
+    source: SyncDeviceIdentity,
+    imported_operations: u32,
+    skipped_operations: u32,
+    trusted_peer_added: bool,
+}
+
 impl AppEnv {
     fn discover() -> AppResult<Self> {
         let app_data_override = std::env::var("STUDENT_BUDGET_TRACKER_DATA_DIR").ok();
@@ -225,6 +314,30 @@ impl AppState {
     }
 }
 
+fn with_runtime_state<R>(state: &AppState, mapper: impl FnOnce(&mut RuntimeState) -> R) -> R {
+    let mut runtime = state.runtime.lock().expect("runtime lock poisoned");
+    mapper(&mut runtime)
+}
+
+fn set_service_runtime_flags(app_handle: &AppHandle, mapper: impl FnOnce(&mut RuntimeState)) {
+    let state = app_handle.state::<AppState>();
+    with_runtime_state(&state, mapper);
+}
+
+fn emit_sync_updated(app_handle: &AppHandle) {
+    let _ = app_handle.emit(SYNC_EVENT_UPDATED, json!({ "at": now_local_iso() }));
+}
+
+fn emit_sync_attention(app_handle: &AppHandle, message: &str) {
+    let _ = app_handle.emit(
+        SYNC_EVENT_ATTENTION,
+        json!({
+            "message": message,
+            "at": now_local_iso(),
+        }),
+    );
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -238,6 +351,11 @@ pub fn run() {
         .setup(|app| {
             let env = AppEnv::discover()?;
             app.manage(AppState::new(env));
+            {
+                let state = app.state::<AppState>();
+                ensure_environment(&state)?;
+            }
+            spawn_background_sync_services(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -269,6 +387,14 @@ pub fn run() {
             run_legacy_migration,
             list_backups,
             update_app_settings,
+            update_local_sync_device_name,
+            export_sync_packet,
+            import_sync_packet,
+            export_sync_packet_for_localsend,
+            process_sync_inbox,
+            open_sync_inbox_folder,
+            discover_lan_peers,
+            sync_with_lan_peer,
             create_backup_now,
             restore_backup,
             reset_all_data,
@@ -281,6 +407,10 @@ pub fn run() {
 fn ensure_environment(state: &AppState) -> AppResult<()> {
     fs::create_dir_all(&state.env.data_dir)?;
     fs::create_dir_all(&state.env.backups_dir)?;
+    fs::create_dir_all(sync_packets_dir(&state.env))?;
+    fs::create_dir_all(sync_inbox_dir(&state.env))?;
+    fs::create_dir_all(sync_archive_dir(&state.env))?;
+    fs::create_dir_all(sync_failed_dir(&state.env))?;
 
     let mut runtime = state.runtime.lock().expect("runtime lock poisoned");
     if !runtime.validated {
@@ -346,6 +476,8 @@ fn init_schema(conn: &Connection) -> AppResult<()> {
         "INSERT OR IGNORE INTO app_settings (singleton_id) VALUES (1)",
         [],
     )?;
+    ensure_app_settings_schema(conn)?;
+    ensure_sync_device_row(conn)?;
     Ok(())
 }
 
@@ -355,6 +487,582 @@ fn now_local_iso() -> String {
 
 fn timestamp_for_file() -> String {
     Local::now().format("%Y%m%d_%H%M%S").to_string()
+}
+
+fn default_sync_device_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "This device".to_string())
+}
+
+fn ensure_sync_device_row(conn: &Connection) -> AppResult<()> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT device_id FROM sync_device WHERE singleton_id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if existing.is_none() {
+        let now = now_local_iso();
+        conn.execute(
+            "INSERT INTO sync_device (singleton_id, device_id, device_name, created_at_utc, updated_at_utc)
+             VALUES (1, ?1, ?2, ?3, ?4)",
+            params![Uuid::new_v4().to_string(), default_sync_device_name(), now, now],
+        )?;
+    }
+    Ok(())
+}
+
+fn sync_packets_dir(env: &AppEnv) -> PathBuf {
+    env.data_dir.join("sync-packets")
+}
+
+fn sync_inbox_dir(env: &AppEnv) -> PathBuf {
+    env.data_dir.join("sync-inbox")
+}
+
+fn sync_archive_dir(env: &AppEnv) -> PathBuf {
+    env.data_dir.join("sync-archive")
+}
+
+fn sync_failed_dir(env: &AppEnv) -> PathBuf {
+    env.data_dir.join("sync-failed")
+}
+
+fn default_sync_packet_path(env: &AppEnv) -> PathBuf {
+    sync_packets_dir(env).join(format!("student-budget-sync_{}.json", timestamp_for_file()))
+}
+
+fn list_sync_packet_files(dir: &Path) -> AppResult<Vec<PathBuf>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut files: Vec<PathBuf> = fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok().map(|item| item.path()))
+        .filter(|path| path.is_file())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+fn move_sync_packet_file(source: &Path, target_dir: &Path) -> AppResult<PathBuf> {
+    fs::create_dir_all(target_dir)?;
+    let file_name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| anyhow!("Invalid sync packet file name: {}", source.display()))?;
+    let mut destination = target_dir.join(file_name);
+    if destination.exists() {
+        let stem = source
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("sync-packet");
+        let extension = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("json");
+        destination = target_dir.join(format!(
+            "{stem}_{}_{}.{}",
+            timestamp_for_file(),
+            Uuid::new_v4(),
+            extension
+        ));
+    }
+    fs::rename(source, &destination)?;
+    Ok(destination)
+}
+
+fn find_localsend_executable() -> Option<PathBuf> {
+    if let Some(override_path) = std::env::var("STUDENT_BUDGET_TRACKER_LOCALSEND_PATH")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+    {
+        return Some(override_path);
+    }
+
+    for candidate in [
+        "localsend_app.exe",
+        "localsend.exe",
+        "localsend_app",
+        "localsend",
+    ] {
+        if let Ok(output) = Command::new("where.exe").arg(candidate).output() {
+            if output.status.success() {
+                if let Some(path) = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                {
+                    let resolved = PathBuf::from(path);
+                    if resolved.exists() {
+                        return Some(resolved);
+                    }
+                }
+            }
+        }
+    }
+
+    let common_paths = [
+        std::env::var_os("ProgramFiles").map(PathBuf::from),
+        std::env::var_os("ProgramFiles(x86)").map(PathBuf::from),
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+    ];
+
+    for root in common_paths.into_iter().flatten() {
+        for relative in [
+            PathBuf::from(r"LocalSend\localsend_app.exe"),
+            PathBuf::from(r"LocalSend\localsend.exe"),
+            PathBuf::from(r"Programs\LocalSend\localsend_app.exe"),
+            PathBuf::from(r"Programs\LocalSend\localsend.exe"),
+        ] {
+            let candidate = root.join(relative);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+fn launch_localsend(localsend_path: &Path) -> AppResult<()> {
+    Command::new(localsend_path).spawn().with_context(|| {
+        format!(
+            "Failed to launch LocalSend from {}.",
+            localsend_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn reveal_file_in_explorer(path: &Path) -> AppResult<()> {
+    Command::new("explorer.exe")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()
+        .with_context(|| format!("Failed to open Explorer for {}.", path.display()))?;
+    Ok(())
+}
+
+fn open_directory_in_explorer(path: &Path) -> AppResult<()> {
+    Command::new("explorer.exe")
+        .arg(path)
+        .spawn()
+        .with_context(|| format!("Failed to open Explorer for {}.", path.display()))?;
+    Ok(())
+}
+
+fn current_sync_outbox_max_seq(conn: &Connection) -> AppResult<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(MAX(op_seq), 0) FROM sync_outbox",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?)
+}
+
+fn trusted_peer_snapshot(
+    conn: &Connection,
+    peer_device_id: &str,
+) -> AppResult<(bool, Option<String>)> {
+    let values = conn
+        .query_row(
+            "SELECT p.peer_device_id, s.last_sync_at_utc
+             FROM sync_peers p
+             LEFT JOIN sync_peer_state s ON s.peer_device_id = p.peer_device_id
+             WHERE p.peer_device_id = ?1",
+            [peer_device_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?;
+
+    Ok(match values {
+        Some((_id, last_sync_at_utc)) => (true, last_sync_at_utc),
+        None => (false, None),
+    })
+}
+
+fn record_successful_outbound_sync(
+    conn: &Connection,
+    peer: &SyncDeviceIdentity,
+    last_sent_seq: i64,
+) -> AppResult<()> {
+    upsert_sync_peer(conn, peer)?;
+    let synced_at = now_local_iso();
+    conn.execute(
+        "UPDATE sync_peer_state
+         SET last_sent_seq = ?2,
+             last_sync_at_utc = ?3,
+             last_error = ''
+         WHERE peer_device_id = ?1",
+        params![peer.device_id, last_sent_seq, synced_at],
+    )?;
+    conn.execute(
+        "UPDATE sync_peers
+         SET device_name = ?2,
+             last_seen_at_utc = ?3
+         WHERE peer_device_id = ?1",
+        params![peer.device_id, peer.device_name, synced_at],
+    )?;
+    Ok(())
+}
+
+fn handle_background_inbox_processing(app_handle: &AppHandle) {
+    let state = app_handle.state::<AppState>();
+    match process_sync_inbox_internal(&state) {
+        Ok(result) => {
+            if result.processed_files > 0 {
+                emit_sync_updated(app_handle);
+            }
+            if result.failed_files > 0 {
+                emit_sync_attention(
+                    app_handle,
+                    &format!(
+                        "Sync inbox moved {} file(s) to the failed folder. Open Settings > Local sync to review them.",
+                        result.failed_files
+                    ),
+                );
+            }
+        }
+        Err(err) => {
+            emit_sync_attention(
+                app_handle,
+                &format!("Automatic sync inbox processing failed: {err}"),
+            );
+        }
+    }
+}
+
+fn handle_incoming_lan_sync(app_handle: &AppHandle, mut stream: TcpStream) -> AppResult<()> {
+    stream.set_read_timeout(Some(StdDuration::from_secs(10)))?;
+    stream.set_write_timeout(Some(StdDuration::from_secs(10)))?;
+
+    let mut payload = Vec::new();
+    stream.read_to_end(&mut payload)?;
+    let request: LanSyncRequest = serde_json::from_slice(&payload)?;
+
+    let state = app_handle.state::<AppState>();
+    let conn = open_connection(&state.env.db_path)?;
+    let response_source = fetch_sync_device_identity(&conn)?;
+    drop(conn);
+
+    if request.app != SYNC_PACKET_APP_NAME || request.schema_version != SYNC_PACKET_SCHEMA_VERSION {
+        let response = LanSyncResponse {
+            app: SYNC_PACKET_APP_NAME.to_string(),
+            schema_version: SYNC_PACKET_SCHEMA_VERSION,
+            ok: false,
+            error: Some("Unsupported LAN sync request.".to_string()),
+            source: response_source,
+            imported_operations: 0,
+            skipped_operations: 0,
+            trusted_peer_added: false,
+        };
+        stream.write_all(&serde_json::to_vec(&response)?)?;
+        return Ok(());
+    }
+
+    match import_sync_packet_value_internal(&state, request.packet) {
+        Ok(result) => {
+            let conn = open_connection(&state.env.db_path)?;
+            let response = LanSyncResponse {
+                app: SYNC_PACKET_APP_NAME.to_string(),
+                schema_version: SYNC_PACKET_SCHEMA_VERSION,
+                ok: true,
+                error: None,
+                source: fetch_sync_device_identity(&conn)?,
+                imported_operations: result.imported_operations,
+                skipped_operations: result.skipped_operations,
+                trusted_peer_added: result.trusted_peer_added,
+            };
+            stream.write_all(&serde_json::to_vec(&response)?)?;
+            emit_sync_updated(app_handle);
+        }
+        Err(err) => {
+            let conn = open_connection(&state.env.db_path)?;
+            let response = LanSyncResponse {
+                app: SYNC_PACKET_APP_NAME.to_string(),
+                schema_version: SYNC_PACKET_SCHEMA_VERSION,
+                ok: false,
+                error: Some(err.to_string()),
+                source: fetch_sync_device_identity(&conn)?,
+                imported_operations: 0,
+                skipped_operations: 0,
+                trusted_peer_added: false,
+            };
+            stream.write_all(&serde_json::to_vec(&response)?)?;
+            emit_sync_attention(app_handle, &format!("Incoming LAN sync failed: {err}"));
+        }
+    }
+
+    Ok(())
+}
+
+fn spawn_sync_inbox_watcher(app_handle: AppHandle) {
+    let inbox_dir = {
+        let state = app_handle.state::<AppState>();
+        sync_inbox_dir(&state.env)
+    };
+
+    thread::spawn(move || {
+        let (tx, rx) = mpsc::channel();
+        let watcher_result = RecommendedWatcher::new(
+            move |result| {
+                let _ = tx.send(result);
+            },
+            Config::default(),
+        );
+
+        let mut watcher = match watcher_result {
+            Ok(watcher) => watcher,
+            Err(err) => {
+                set_service_runtime_flags(&app_handle, |runtime| {
+                    runtime.inbox_watch_active = false;
+                });
+                emit_sync_attention(
+                    &app_handle,
+                    &format!("Sync inbox watcher could not start: {err}"),
+                );
+                return;
+            }
+        };
+
+        if let Err(err) = watcher.watch(&inbox_dir, RecursiveMode::NonRecursive) {
+            set_service_runtime_flags(&app_handle, |runtime| {
+                runtime.inbox_watch_active = false;
+            });
+            emit_sync_attention(
+                &app_handle,
+                &format!(
+                    "Sync inbox watcher could not watch {}: {err}",
+                    inbox_dir.display()
+                ),
+            );
+            return;
+        }
+
+        set_service_runtime_flags(&app_handle, |runtime| {
+            runtime.inbox_watch_active = true;
+        });
+
+        loop {
+            match rx.recv() {
+                Ok(Ok(_event)) => {
+                    thread::sleep(StdDuration::from_millis(250));
+                    while let Ok(_pending) = rx.try_recv() {}
+                    handle_background_inbox_processing(&app_handle);
+                }
+                Ok(Err(err)) => {
+                    emit_sync_attention(&app_handle, &format!("Sync inbox watcher error: {err}"));
+                }
+                Err(_) => {
+                    set_service_runtime_flags(&app_handle, |runtime| {
+                        runtime.inbox_watch_active = false;
+                    });
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn spawn_lan_discovery_service(app_handle: AppHandle) {
+    thread::spawn(move || {
+        let socket = match UdpSocket::bind(("0.0.0.0", SYNC_DISCOVERY_PORT)) {
+            Ok(socket) => socket,
+            Err(err) => {
+                emit_sync_attention(
+                    &app_handle,
+                    &format!(
+                        "LAN discovery responder could not bind port {SYNC_DISCOVERY_PORT}: {err}"
+                    ),
+                );
+                return;
+            }
+        };
+
+        let mut buffer = [0u8; 4096];
+        loop {
+            let (bytes, sender) = match socket.recv_from(&mut buffer) {
+                Ok(values) => values,
+                Err(_) => continue,
+            };
+            let request: LanDiscoveryRequest = match serde_json::from_slice(&buffer[..bytes]) {
+                Ok(request) => request,
+                Err(_) => continue,
+            };
+            if request.app != SYNC_PACKET_APP_NAME
+                || request.schema_version != SYNC_PACKET_SCHEMA_VERSION
+                || request.source.device_id.trim().is_empty()
+            {
+                continue;
+            }
+
+            let state = app_handle.state::<AppState>();
+            let conn = match open_connection(&state.env.db_path) {
+                Ok(conn) => conn,
+                Err(_) => continue,
+            };
+            let local_identity = match fetch_sync_device_identity(&conn) {
+                Ok(identity) => identity,
+                Err(_) => continue,
+            };
+            if request.source.device_id == local_identity.device_id {
+                continue;
+            }
+
+            let response = LanDiscoveryResponse {
+                app: SYNC_PACKET_APP_NAME.to_string(),
+                schema_version: SYNC_PACKET_SCHEMA_VERSION,
+                request_id: request.request_id,
+                source: local_identity,
+                sync_port: SYNC_LAN_PORT,
+            };
+            let target = std::net::SocketAddr::new(sender.ip(), request.response_port);
+            let _ = socket.send_to(&serde_json::to_vec(&response).unwrap_or_default(), target);
+        }
+    });
+}
+
+fn spawn_lan_sync_listener(app_handle: AppHandle) {
+    thread::spawn(move || {
+        let listener = match TcpListener::bind(("0.0.0.0", SYNC_LAN_PORT)) {
+            Ok(listener) => listener,
+            Err(err) => {
+                set_service_runtime_flags(&app_handle, |runtime| {
+                    runtime.lan_direct_available = false;
+                    runtime.lan_sync_port = None;
+                });
+                emit_sync_attention(
+                    &app_handle,
+                    &format!("Direct LAN sync listener could not bind port {SYNC_LAN_PORT}: {err}"),
+                );
+                return;
+            }
+        };
+
+        set_service_runtime_flags(&app_handle, |runtime| {
+            runtime.lan_direct_available = true;
+            runtime.lan_sync_port = Some(SYNC_LAN_PORT);
+        });
+
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let app_handle = app_handle.clone();
+                    thread::spawn(move || {
+                        let _ = handle_incoming_lan_sync(&app_handle, stream);
+                    });
+                }
+                Err(err) => {
+                    emit_sync_attention(
+                        &app_handle,
+                        &format!("Direct LAN sync listener error: {err}"),
+                    );
+                }
+            }
+        }
+
+        set_service_runtime_flags(&app_handle, |runtime| {
+            runtime.lan_direct_available = false;
+            runtime.lan_sync_port = None;
+        });
+    });
+}
+
+fn spawn_background_sync_services(app_handle: AppHandle) {
+    spawn_sync_inbox_watcher(app_handle.clone());
+    spawn_lan_discovery_service(app_handle.clone());
+    spawn_lan_sync_listener(app_handle);
+}
+
+fn canonical_month_key(date: NaiveDate) -> String {
+    format!("{}-{:02}", date.year(), date.month())
+}
+
+fn planning_start_month_key_from_legacy_month(start_month: u32, reference: NaiveDate) -> String {
+    let start_year = if reference.month() >= start_month {
+        reference.year()
+    } else {
+        reference.year() - 1
+    };
+    format!("{start_year}-{start_month:02}")
+}
+
+fn normalize_planning_start_month_key(
+    value: &str,
+    fallback_start_month: u32,
+    reference: NaiveDate,
+) -> AppResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(planning_start_month_key_from_legacy_month(
+            fallback_start_month.clamp(1, 12),
+            reference,
+        ));
+    }
+
+    Ok(canonical_month_key(parse_month_start(trimmed)?))
+}
+
+fn start_month_from_month_key(value: &str) -> AppResult<u32> {
+    Ok(parse_month_start(value)?.month())
+}
+
+fn normalize_app_settings(settings: AppSettings, reference: NaiveDate) -> AppResult<AppSettings> {
+    let planning_start_month_key = normalize_planning_start_month_key(
+        &settings.planning_start_month_key,
+        settings.school_year_start_month,
+        reference,
+    )?;
+
+    Ok(AppSettings {
+        school_year_start_month: start_month_from_month_key(&planning_start_month_key)?,
+        planning_start_month_key,
+        school_year_months: settings.school_year_months.max(1),
+        ..settings
+    })
+}
+
+fn ensure_app_settings_schema(conn: &Connection) -> AppResult<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(app_settings)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let mut has_planning_start_month_key = false;
+    for row in rows {
+        if row? == "planning_start_month_key" {
+            has_planning_start_month_key = true;
+            break;
+        }
+    }
+
+    if !has_planning_start_month_key {
+        conn.execute(
+            "ALTER TABLE app_settings ADD COLUMN planning_start_month_key TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+
+    let legacy_start_month = conn
+        .query_row(
+            "SELECT school_year_start_month FROM app_settings WHERE singleton_id = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(DEFAULT_SCHOOL_YEAR_START_MONTH as i64)
+        .clamp(1, 12) as u32;
+    let fallback_key =
+        planning_start_month_key_from_legacy_month(legacy_start_month, today_local());
+    conn.execute(
+        "UPDATE app_settings
+         SET planning_start_month_key = ?1
+         WHERE singleton_id = 1
+           AND COALESCE(TRIM(planning_start_month_key), '') = ''",
+        params![fallback_key],
+    )?;
+
+    Ok(())
 }
 
 fn stringify_account_type(value: &AccountType) -> &'static str {
@@ -458,36 +1166,17 @@ fn date_to_occurrence_iso(date: NaiveDate) -> String {
 }
 
 fn school_year_month_keys(settings: &AppSettings, reference: NaiveDate) -> Vec<String> {
-    let start_month = settings.school_year_start_month as i32;
+    let planning_start_month_key = normalize_planning_start_month_key(
+        &settings.planning_start_month_key,
+        settings.school_year_start_month,
+        reference,
+    )
+    .unwrap_or_else(|_| canonical_month_key(reference));
+    let mut month_start = parse_month_start(&planning_start_month_key).unwrap_or(reference);
     let total_months = settings.school_year_months as i32;
-    let start_year = if reference.month() as i32 >= start_month {
-        reference.year()
-    } else {
-        reference.year() - 1
-    };
     let mut months = Vec::new();
-    let mut year = start_year;
-    let mut month = start_month;
     for _ in 0..total_months {
-        months.push(format!("{year}-{month:02}"));
-        month += 1;
-        if month > 12 {
-            month = 1;
-            year += 1;
-        }
-    }
-    months
-}
-
-fn forward_month_keys(start: NaiveDate, total_months: u32) -> Vec<String> {
-    let mut months = Vec::new();
-    let mut month_start = start;
-    for _ in 0..total_months.max(1) {
-        months.push(format!(
-            "{}-{:02}",
-            month_start.year(),
-            month_start.month()
-        ));
+        months.push(canonical_month_key(month_start));
         month_start = add_months(month_start, 1);
     }
     months
@@ -500,6 +1189,10 @@ fn is_rent_like(entry: &str) -> bool {
 
 #[cfg(test)]
 fn entry_effect(entry: &LedgerEntry) -> f64 {
+    entry_balance_effect(entry)
+}
+
+fn entry_balance_effect(entry: &LedgerEntry) -> f64 {
     match entry.entry_kind {
         EntryKind::Expense => -entry.amount.abs(),
         EntryKind::Funding | EntryKind::RentCredit => entry.amount.abs(),
@@ -801,40 +1494,50 @@ fn fetch_monthly_caps(conn: &Connection) -> AppResult<Vec<MonthlyCap>> {
 }
 
 fn fetch_settings(conn: &Connection) -> AppResult<AppSettings> {
-    conn.query_row(
-        "SELECT school_year_start_month, school_year_months, language, backup_retention, last_migration_version FROM app_settings WHERE singleton_id = 1",
+    let settings = conn.query_row(
+        "SELECT school_year_start_month, planning_start_month_key, school_year_months, language, backup_retention, last_migration_version FROM app_settings WHERE singleton_id = 1",
         [],
         |row| {
             Ok(AppSettings {
                 school_year_start_month: row.get::<_, i64>(0)? as u32,
-                school_year_months: row.get::<_, i64>(1)? as u32,
-                language: row.get(2)?,
-                backup_retention: row.get::<_, i64>(3)? as u32,
-                last_migration_version: row.get::<_, i64>(4)? as u32,
+                planning_start_month_key: row.get::<_, String>(1)?,
+                school_year_months: row.get::<_, i64>(2)? as u32,
+                language: row.get(3)?,
+                backup_retention: row.get::<_, i64>(4)? as u32,
+                last_migration_version: row.get::<_, i64>(5)? as u32,
             })
         },
-    )
-    .map_err(Into::into)
+    )?;
+
+    normalize_app_settings(settings, today_local())
 }
 
 fn update_settings_row(conn: &Connection, settings: &AppSettings) -> AppResult<()> {
+    let normalized = normalize_app_settings(settings.clone(), today_local())?;
     conn.execute(
-        "UPDATE app_settings SET school_year_start_month = ?1, school_year_months = ?2, language = ?3, backup_retention = ?4, last_migration_version = ?5 WHERE singleton_id = 1",
+        "UPDATE app_settings
+         SET school_year_start_month = ?1,
+             planning_start_month_key = ?2,
+             school_year_months = ?3,
+             language = ?4,
+             backup_retention = ?5,
+             last_migration_version = ?6
+         WHERE singleton_id = 1",
         params![
-            settings.school_year_start_month,
-            settings.school_year_months,
-            settings.language,
-            settings.backup_retention,
-            settings.last_migration_version,
+            normalized.school_year_start_month,
+            normalized.planning_start_month_key,
+            normalized.school_year_months,
+            normalized.language,
+            normalized.backup_retention,
+            normalized.last_migration_version,
         ],
     )?;
     Ok(())
 }
 
 fn validate_settings_input(input: &UpdateSettingsInput) -> AppResult<()> {
-    if !(1..=12).contains(&input.school_year_start_month) {
-        return Err(anyhow!("School-year start month must be between 1 and 12."));
-    }
+    let _ = parse_month_start(input.planning_start_month_key.trim())
+        .map_err(|_| anyhow!("Planning window start must use YYYY-MM."))?;
     if !(1..=12).contains(&input.school_year_months) {
         return Err(anyhow!(
             "School-year length must be between 1 and 12 months."
@@ -845,6 +1548,310 @@ fn validate_settings_input(input: &UpdateSettingsInput) -> AppResult<()> {
             "Backup retention must be between 1 and 200 copies."
         ));
     }
+    Ok(())
+}
+
+fn fetch_sync_peer_summaries(conn: &Connection) -> AppResult<Vec<SyncPeerSummary>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.peer_device_id, p.device_name, p.paired_at_utc, p.last_seen_at_utc, s.last_sync_at_utc
+         FROM sync_peers p
+         LEFT JOIN sync_peer_state s ON s.peer_device_id = p.peer_device_id
+         ORDER BY p.device_name COLLATE NOCASE ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(SyncPeerSummary {
+            peer_device_id: row.get(0)?,
+            device_name: row.get(1)?,
+            paired_at_utc: row.get(2)?,
+            last_seen_at_utc: row.get(3)?,
+            last_sync_at_utc: row.get(4)?,
+        })
+    })?;
+
+    let mut peers = Vec::new();
+    for row in rows {
+        peers.push(row?);
+    }
+    Ok(peers)
+}
+
+fn fetch_local_sync_state(conn: &Connection, state: &AppState) -> AppResult<LocalSyncState> {
+    ensure_sync_device_row(conn)?;
+    let env = &state.env;
+    let localsend_path = find_localsend_executable().map(|path| path.to_string_lossy().to_string());
+    let inbox_packet_count = list_sync_packet_files(&sync_inbox_dir(&env))?.len() as u32;
+    let (inbox_watch_active, lan_direct_available, lan_sync_port) =
+        with_runtime_state(state, |runtime| {
+            (
+                runtime.inbox_watch_active,
+                runtime.lan_direct_available,
+                runtime.lan_sync_port,
+            )
+        });
+    let (device_id, device_name): (String, String) = conn.query_row(
+        "SELECT device_id, device_name FROM sync_device WHERE singleton_id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    let pending_operations = conn.query_row("SELECT COUNT(*) FROM sync_outbox", [], |row| {
+        row.get::<_, i64>(0)
+    })? as u32;
+    let trusted_peers = fetch_sync_peer_summaries(conn)?;
+    let last_sync_at_utc = conn
+        .query_row(
+            "SELECT last_sync_at_utc
+             FROM sync_peer_state
+             WHERE last_sync_at_utc IS NOT NULL
+             ORDER BY last_sync_at_utc DESC
+             LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let last_error = conn
+        .query_row(
+            "SELECT last_error
+             FROM sync_peer_state
+             WHERE TRIM(last_error) <> ''
+             ORDER BY COALESCE(last_sync_at_utc, '') DESC
+             LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    Ok(LocalSyncState {
+        device_id,
+        device_name,
+        pending_operations,
+        inbox_packet_count,
+        trusted_peers,
+        last_sync_at_utc,
+        last_error,
+        transport_mode: if lan_direct_available {
+            "direct_lan_sync_v1".to_string()
+        } else if localsend_path.is_some() {
+            "localsend_assisted_packet_exchange_v1".to_string()
+        } else {
+            "manual_packet_exchange_v1".to_string()
+        },
+        localsend_available: localsend_path.is_some(),
+        localsend_path,
+        inbox_watch_active,
+        lan_direct_available,
+        lan_sync_port,
+        sync_inbox_path: sync_inbox_dir(env).to_string_lossy().to_string(),
+        sync_archive_path: sync_archive_dir(env).to_string_lossy().to_string(),
+        sync_failed_path: sync_failed_dir(env).to_string_lossy().to_string(),
+    })
+}
+
+fn fetch_sync_device_identity(conn: &Connection) -> AppResult<SyncDeviceIdentity> {
+    ensure_sync_device_row(conn)?;
+    let (device_id, device_name): (String, String) = conn.query_row(
+        "SELECT device_id, device_name FROM sync_device WHERE singleton_id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(SyncDeviceIdentity {
+        device_id,
+        device_name,
+    })
+}
+
+fn update_local_sync_device_name_row(conn: &Connection, device_name: &str) -> AppResult<()> {
+    let trimmed = device_name.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("Device name cannot be empty."));
+    }
+    ensure_sync_device_row(conn)?;
+    conn.execute(
+        "UPDATE sync_device SET device_name = ?1, updated_at_utc = ?2 WHERE singleton_id = 1",
+        params![trimmed, now_local_iso()],
+    )?;
+    Ok(())
+}
+
+fn queue_sync_outbox_value(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: &str,
+    operation_type: &str,
+    payload: Value,
+) -> AppResult<()> {
+    ensure_sync_device_row(conn)?;
+    let device_id: String = conn.query_row(
+        "SELECT device_id FROM sync_device WHERE singleton_id = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO sync_outbox (device_id, entity_type, entity_id, operation_type, payload_json, created_at_utc)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            device_id,
+            entity_type,
+            entity_id,
+            operation_type,
+            serde_json::to_string(&payload)?,
+            now_local_iso()
+        ],
+    )?;
+    Ok(())
+}
+
+fn queue_sync_outbox<T: serde::Serialize>(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: &str,
+    operation_type: &str,
+    payload: &T,
+) -> AppResult<()> {
+    queue_sync_outbox_value(
+        conn,
+        entity_type,
+        entity_id,
+        operation_type,
+        serde_json::to_value(payload)?,
+    )
+}
+
+fn fetch_sync_operations(conn: &Connection) -> AppResult<Vec<SyncOperationRecord>> {
+    ensure_sync_device_row(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT op_seq, device_id, entity_type, entity_id, operation_type, payload_json, created_at_utc
+         FROM sync_outbox
+         ORDER BY op_seq ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let payload_json = row.get::<_, String>(5)?;
+        let payload_json = serde_json::from_str(&payload_json).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(err))
+        })?;
+        Ok(SyncOperationRecord {
+            op_seq: row.get(0)?,
+            device_id: row.get(1)?,
+            entity_type: row.get(2)?,
+            entity_id: row.get(3)?,
+            operation_type: row.get(4)?,
+            payload_json,
+            created_at_utc: row.get(6)?,
+        })
+    })?;
+
+    let mut operations = Vec::new();
+    for row in rows {
+        operations.push(row?);
+    }
+    Ok(operations)
+}
+
+fn upsert_sync_peer(conn: &Connection, peer: &SyncDeviceIdentity) -> AppResult<bool> {
+    let existing_name: Option<String> = conn
+        .query_row(
+            "SELECT device_name FROM sync_peers WHERE peer_device_id = ?1",
+            [&peer.device_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let now = now_local_iso();
+    conn.execute(
+        "INSERT INTO sync_peers (peer_device_id, device_name, paired_at_utc, last_seen_at_utc, fingerprint)
+         VALUES (?1, ?2, ?3, ?4, '')
+         ON CONFLICT(peer_device_id) DO UPDATE SET
+           device_name = excluded.device_name,
+           last_seen_at_utc = excluded.last_seen_at_utc",
+        params![peer.device_id, peer.device_name, now, now],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO sync_peer_state (peer_device_id) VALUES (?1)",
+        [&peer.device_id],
+    )?;
+    Ok(existing_name.is_none())
+}
+
+fn set_sync_peer_last_error(
+    conn: &Connection,
+    peer_device_id: &str,
+    error_message: &str,
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE sync_peer_state
+         SET last_error = ?2
+         WHERE peer_device_id = ?1",
+        params![peer_device_id, error_message],
+    )?;
+    Ok(())
+}
+
+fn apply_sync_operation(conn: &Connection, operation: &SyncOperationRecord) -> AppResult<()> {
+    match (
+        operation.entity_type.as_str(),
+        operation.operation_type.as_str(),
+    ) {
+        ("account", "upsert") => {
+            let account: Account = serde_json::from_value(operation.payload_json.clone())?;
+            insert_account_raw(conn, &account)?;
+        }
+        ("ledger_entry", "upsert") => {
+            let entry: LedgerEntry = serde_json::from_value(operation.payload_json.clone())?;
+            insert_entry_raw(conn, &entry)?;
+        }
+        ("ledger_entry", "delete") => {
+            let entry_id = operation
+                .payload_json
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or(operation.entity_id.as_str());
+            delete_entry_raw(conn, entry_id)?;
+        }
+        ("transfer_group", "upsert") => {
+            let entries_value = operation
+                .payload_json
+                .get("entries")
+                .cloned()
+                .ok_or_else(|| anyhow!("Transfer packet is missing entries."))?;
+            let entries: Vec<LedgerEntry> = serde_json::from_value(entries_value)?;
+            for entry in entries {
+                insert_entry_raw(conn, &entry)?;
+            }
+        }
+        ("transfer_group", "delete") => {
+            let group_id = operation
+                .payload_json
+                .get("transfer_group_id")
+                .and_then(Value::as_str)
+                .unwrap_or(operation.entity_id.as_str());
+            for entry in fetch_entries_by_transfer_group(conn, group_id)? {
+                delete_entry_raw(conn, &entry.id)?;
+            }
+        }
+        ("recurring_rule", "upsert") => {
+            let rule: RecurringRule = serde_json::from_value(operation.payload_json.clone())?;
+            insert_rule_raw(conn, &rule)?;
+        }
+        ("recurring_rule", "delete") => {
+            delete_rule_raw(conn, &operation.entity_id)?;
+        }
+        ("monthly_cap", "upsert") => {
+            let cap: MonthlyCap = serde_json::from_value(operation.payload_json.clone())?;
+            insert_cap_raw(conn, &cap)?;
+        }
+        ("monthly_cap", "delete") => {
+            delete_cap_raw(conn, &operation.entity_id)?;
+        }
+        ("shared_settings", "upsert") => {
+            let settings: AppSettings = serde_json::from_value(operation.payload_json.clone())?;
+            update_settings_row(conn, &settings)?;
+        }
+        (entity_type, operation_type) => {
+            return Err(anyhow!(
+                "Unsupported sync operation {entity_type}/{operation_type}."
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -942,13 +1949,23 @@ fn validate_restore_backup_path(env: &AppEnv, backup_path: &Path) -> AppResult<P
 
 fn replace_all_data(conn: &mut Connection, payload: &Value) -> AppResult<()> {
     let tx = conn.transaction()?;
+    tx.execute("DELETE FROM sync_outbox", [])?;
+    tx.execute(
+        "UPDATE sync_peer_state
+         SET last_sent_seq = 0,
+             last_received_seq = 0,
+             last_sync_at_utc = NULL,
+             last_error = ''",
+        [],
+    )?;
     tx.execute("DELETE FROM ledger_entries", [])?;
     tx.execute("DELETE FROM recurring_rules", [])?;
     tx.execute("DELETE FROM monthly_caps", [])?;
     tx.execute("DELETE FROM accounts", [])?;
 
     if let Some(settings) = payload.get("settings") {
-        let settings: AppSettings = serde_json::from_value(settings.clone())?;
+        let settings =
+            normalize_app_settings(serde_json::from_value(settings.clone())?, today_local())?;
         update_settings_row(&tx, &settings)?;
     }
 
@@ -1146,6 +2163,10 @@ fn add_months(date: NaiveDate, months: i32) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
 }
 
+fn end_of_month(date: NaiveDate) -> NaiveDate {
+    add_months(date, 1) - Duration::days(1)
+}
+
 fn scheduled_dates(
     rule: &RecurringRule,
     from: NaiveDate,
@@ -1252,6 +2273,7 @@ fn apply_rule_dates(
             exclude_from_insights: false,
         };
         insert_entry_raw(&tx, &entry)?;
+        queue_sync_outbox(&tx, "ledger_entry", &entry.id, "upsert", &entry)?;
     }
     if let Some(last) = dates.last() {
         tx.execute(
@@ -1376,10 +2398,7 @@ fn resolve_snapshot_query(
         };
 
     let range_months = match &range {
-        InsightRangeSpec::SchoolYear => {
-            let planning_start = parse_month_start(&focus_month)?;
-            forward_month_keys(planning_start, settings.school_year_months)
-        }
+        InsightRangeSpec::SchoolYear => school_year_month_keys(settings, reference_date),
         InsightRangeSpec::CurrentMonth => vec![focus_month.clone()],
         InsightRangeSpec::Month(month) => vec![month.clone()],
     };
@@ -1478,7 +2497,7 @@ fn snapshot_context_lines(query: &SnapshotQuery) -> Vec<String> {
 
 fn calculate_snapshot_with_query(
     conn: &Connection,
-    settings: &AppSettings,
+    _settings: &AppSettings,
     query: &SnapshotQuery,
 ) -> AppResult<InsightSnapshot> {
     let accounts = fetch_accounts(conn)?;
@@ -1513,12 +2532,15 @@ fn calculate_snapshot_with_query(
         .into_iter()
         .filter(|cap| cap_matches_filters(cap, &query.filters))
         .collect::<Vec<_>>();
-    let filtered_entries = entries
-        .into_iter()
-        .filter(|entry| {
-            active_account_ids.contains(&entry.account_id)
-                && entry_matches_filters(entry, &query.filters)
-        })
+    let balance_entries = entries
+        .iter()
+        .filter(|entry| active_account_ids.contains(&entry.account_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let filtered_entries = balance_entries
+        .iter()
+        .filter(|entry| entry_matches_filters(entry, &query.filters))
+        .cloned()
         .collect::<Vec<_>>();
 
     let range_month_set = query.range_months.iter().cloned().collect::<HashSet<_>>();
@@ -1551,29 +2573,53 @@ fn calculate_snapshot_with_query(
         .map(|cap| cap.amount)
         .sum::<f64>();
 
+    let range_end = query
+        .range_months
+        .last()
+        .map(|month| parse_month_start(month).map(end_of_month))
+        .transpose()?
+        .unwrap_or(query.reference_date);
+    let current_month = current_month_key();
+    let current_month_start = parse_month_start(&current_month)?;
+    let current_month_spend = filtered_entries
+        .iter()
+        .filter(|entry| {
+            entry.entry_kind == EntryKind::Expense
+                && !entry.exclude_from_insights
+                && month_key(&entry.occurred_at_local) == Some(current_month.as_str())
+        })
+        .map(|entry| entry.amount.abs())
+        .sum::<f64>();
+
     let remaining_fixed_bills = active_rules
         .iter()
         .filter(|rule| {
             rule.status != RecurringStatus::Paused && rule.entry_kind == EntryKind::Expense
         })
         .map(|rule| {
-            let future_dates = scheduled_dates(
-                rule,
-                query.reference_date,
-                add_months(query.reference_date, settings.school_year_months as i32),
-            )
-            .unwrap_or_default();
+            let future_dates =
+                scheduled_dates(rule, query.reference_date, range_end).unwrap_or_default();
             future_dates.len() as f64 * rule.amount
         })
         .sum::<f64>();
 
-    let remaining_caps = filtered_caps
+    let remaining_caps = query
+        .range_months
         .iter()
-        .filter(|cap| {
-            range_month_set.contains(&cap.month_key)
-                && cap.month_key.as_str() >= query.focus_month.as_str()
+        .map(|month| {
+            let cap_total = filtered_caps
+                .iter()
+                .filter(|cap| cap.month_key == *month)
+                .map(|cap| cap.amount)
+                .sum::<f64>();
+            if month.as_str() < current_month.as_str() {
+                0.0
+            } else if month == &current_month {
+                (cap_total - current_month_spend).max(0.0)
+            } else {
+                cap_total
+            }
         })
-        .map(|cap| cap.amount)
         .sum::<f64>();
 
     let school_year_runway_remaining = total_available_cash - remaining_fixed_bills;
@@ -1581,7 +2627,7 @@ fn calculate_snapshot_with_query(
         total_available_cash - remaining_fixed_bills - remaining_caps;
 
     let focus_month_start = parse_month_start(&query.focus_month)?;
-    let focus_month_end = add_months(focus_month_start, 1) - Duration::days(1);
+    let focus_month_end = end_of_month(focus_month_start);
     let rent_due_this_month = active_rules
         .iter()
         .filter(|rule| {
@@ -1711,49 +2757,75 @@ fn calculate_snapshot_with_query(
         .collect::<Vec<_>>();
     activity_groups.sort_by(|left, right| right.month_key.cmp(&left.month_key));
 
-    let mut runway_balance = total_available_cash;
-    let monthly_series = query
-        .range_months
+    let opening_balance_total = active_accounts
         .iter()
-        .map(|month| {
-            let spent = filtered_entries
-                .iter()
-                .filter(|entry| {
-                    entry.entry_kind == EntryKind::Expense
-                        && !entry.exclude_from_insights
-                        && month_key(&entry.occurred_at_local) == Some(month.as_str())
-                })
-                .map(|entry| entry.amount)
-                .sum::<f64>();
-            let cap_total = filtered_caps
-                .iter()
-                .filter(|cap| &cap.month_key == month)
-                .map(|cap| cap.amount)
-                .sum::<f64>();
-            let fixed = active_rules
+        .map(|account| account.opening_balance)
+        .sum::<f64>();
+    let mut projected_balance = total_available_cash;
+    let mut monthly_series = Vec::new();
+    for month in &query.range_months {
+        let month_start = parse_month_start(month)?;
+        let month_end = end_of_month(month_start);
+        let spent = filtered_entries
+            .iter()
+            .filter(|entry| {
+                entry.entry_kind == EntryKind::Expense
+                    && !entry.exclude_from_insights
+                    && month_key(&entry.occurred_at_local) == Some(month.as_str())
+            })
+            .map(|entry| entry.amount)
+            .sum::<f64>();
+        let cap_total = filtered_caps
+            .iter()
+            .filter(|cap| cap.month_key == *month)
+            .map(|cap| cap.amount)
+            .sum::<f64>();
+
+        let runway_balance = if month_start < current_month_start {
+            opening_balance_total
+                + balance_entries
+                    .iter()
+                    .filter_map(|entry| {
+                        parse_date(&entry.occurred_at_local)
+                            .ok()
+                            .filter(|entry_date| *entry_date <= month_end)
+                            .map(|_| entry_balance_effect(entry))
+                    })
+                    .sum::<f64>()
+        } else {
+            let fixed_remaining = active_rules
                 .iter()
                 .filter(|rule| {
                     rule.status != RecurringStatus::Paused && rule.entry_kind == EntryKind::Expense
                 })
-                .filter_map(|rule| {
-                    scheduled_dates(
-                        rule,
-                        parse_month_start(month).ok()?,
-                        add_months(parse_month_start(month).ok()?, 1) - Duration::days(1),
-                    )
-                    .ok()
-                    .map(|dates| dates.len() as f64 * rule.amount)
+                .map(|rule| {
+                    let due_from = if month_start == current_month_start {
+                        query.reference_date.max(month_start)
+                    } else {
+                        month_start
+                    };
+                    scheduled_dates(rule, due_from, month_end)
+                        .unwrap_or_default()
+                        .len() as f64
+                        * rule.amount
                 })
                 .sum::<f64>();
-            runway_balance -= fixed + cap_total;
-            MonthlySeriesPoint {
-                month_key: month.clone(),
-                spent,
-                cap: cap_total,
-                runway_balance,
-            }
-        })
-        .collect::<Vec<_>>();
+            let cap_remaining = if month_start == current_month_start {
+                (cap_total - current_month_spend).max(0.0)
+            } else {
+                cap_total
+            };
+            projected_balance -= fixed_remaining + cap_remaining;
+            projected_balance
+        };
+
+        monthly_series.push(MonthlySeriesPoint {
+            month_key: month.clone(),
+            spent,
+            cap: cap_total,
+            runway_balance,
+        });
+    }
 
     let context_lines = snapshot_context_lines(query);
     let build_lines = |metric_lines: Vec<String>| {
@@ -2027,6 +3099,10 @@ fn legacy_entry_amount(kind: &EntryKind, tx_type: &str, amount: f64) -> f64 {
 fn legacy_app_settings(language: String, school_year_months: u32) -> AppSettings {
     AppSettings {
         school_year_start_month: DEFAULT_SCHOOL_YEAR_START_MONTH,
+        planning_start_month_key: planning_start_month_key_from_legacy_month(
+            DEFAULT_SCHOOL_YEAR_START_MONTH,
+            today_local(),
+        ),
         school_year_months: school_year_months.max(1),
         language,
         backup_retention: DEFAULT_BACKUP_RETENTION,
@@ -2527,6 +3603,337 @@ fn import_json_internal(state: &AppState, path: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn build_sync_packet(conn: &Connection) -> AppResult<SyncPacket> {
+    Ok(SyncPacket {
+        app: SYNC_PACKET_APP_NAME.to_string(),
+        schema_version: SYNC_PACKET_SCHEMA_VERSION,
+        generated_at_utc: now_local_iso(),
+        source: fetch_sync_device_identity(conn)?,
+        operations: fetch_sync_operations(conn)?,
+    })
+}
+
+fn export_sync_packet_internal(state: &AppState, path: &str) -> AppResult<SyncPacketExportResult> {
+    ensure_environment(state)?;
+    let conn = open_connection(&state.env.db_path)?;
+    let packet = build_sync_packet(&conn)?;
+    fs::write(path, serde_json::to_string_pretty(&packet)?)
+        .with_context(|| format!("Failed to write sync packet to {path}"))?;
+
+    Ok(SyncPacketExportResult {
+        path: path.to_string(),
+        operation_count: packet.operations.len() as u32,
+    })
+}
+
+fn export_sync_packet_for_localsend_internal(
+    state: &AppState,
+) -> AppResult<SyncPacketLaunchResult> {
+    ensure_environment(state)?;
+    let localsend_path = find_localsend_executable().ok_or_else(|| {
+        anyhow!(
+            "LocalSend was not found. Install LocalSend or set STUDENT_BUDGET_TRACKER_LOCALSEND_PATH."
+        )
+    })?;
+    fs::create_dir_all(sync_packets_dir(&state.env))?;
+    let packet_path = default_sync_packet_path(&state.env);
+    let export_result = export_sync_packet_internal(state, &packet_path.to_string_lossy())?;
+    launch_localsend(&localsend_path)?;
+    reveal_file_in_explorer(&packet_path)?;
+
+    Ok(SyncPacketLaunchResult {
+        path: export_result.path,
+        operation_count: export_result.operation_count,
+        localsend_path: localsend_path.to_string_lossy().to_string(),
+        explorer_revealed: true,
+    })
+}
+
+fn import_sync_packet_value_internal(
+    state: &AppState,
+    packet: SyncPacket,
+) -> AppResult<SyncPacketImportResult> {
+    if packet.app != SYNC_PACKET_APP_NAME {
+        return Err(anyhow!(
+            "Unsupported sync packet source: expected {SYNC_PACKET_APP_NAME}."
+        ));
+    }
+    if packet.schema_version != SYNC_PACKET_SCHEMA_VERSION {
+        return Err(anyhow!(
+            "Unsupported sync packet schema version: {}.",
+            packet.schema_version
+        ));
+    }
+    if packet.source.device_id.trim().is_empty() {
+        return Err(anyhow!("Sync packet is missing a source device ID."));
+    }
+    if packet.source.device_name.trim().is_empty() {
+        return Err(anyhow!("Sync packet is missing a source device name."));
+    }
+    if packet
+        .operations
+        .iter()
+        .any(|operation| operation.device_id != packet.source.device_id)
+    {
+        return Err(anyhow!(
+            "Sync packet contains operations from more than one device."
+        ));
+    }
+
+    ensure_environment(state)?;
+    let mut conn = open_connection(&state.env.db_path)?;
+    let local_identity = fetch_sync_device_identity(&conn)?;
+    if packet.source.device_id == local_identity.device_id {
+        return Err(anyhow!(
+            "This sync packet was exported by the current device and cannot be re-imported here."
+        ));
+    }
+
+    let last_received_seq: i64 = conn
+        .query_row(
+            "SELECT last_received_seq FROM sync_peer_state WHERE peer_device_id = ?1",
+            [&packet.source.device_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    let new_operation_count = packet
+        .operations
+        .iter()
+        .filter(|operation| operation.op_seq > last_received_seq)
+        .count() as u32;
+
+    if new_operation_count > 0 {
+        let previous = snapshot_payload(&conn)?;
+        push_undo(state, UndoAction::RestoreSnapshot { payload: previous });
+    }
+
+    let import_attempt = (|| -> AppResult<SyncPacketImportResult> {
+        let tx = conn.transaction()?;
+        let trusted_peer_added = upsert_sync_peer(&tx, &packet.source)?;
+        let mut imported_operations = 0u32;
+        let mut skipped_operations = 0u32;
+        let mut max_received_seq = last_received_seq;
+
+        for operation in &packet.operations {
+            if operation.op_seq <= last_received_seq {
+                skipped_operations += 1;
+                continue;
+            }
+            apply_sync_operation(&tx, operation)?;
+            imported_operations += 1;
+            max_received_seq = max_received_seq.max(operation.op_seq);
+        }
+
+        let synced_at = now_local_iso();
+        tx.execute(
+            "UPDATE sync_peers SET device_name = ?2, last_seen_at_utc = ?3 WHERE peer_device_id = ?1",
+            params![packet.source.device_id, packet.source.device_name, synced_at],
+        )?;
+        tx.execute(
+            "UPDATE sync_peer_state
+             SET last_received_seq = ?2,
+                 last_sync_at_utc = ?3,
+                 last_error = ''
+             WHERE peer_device_id = ?1",
+            params![packet.source.device_id, max_received_seq, synced_at],
+        )?;
+        tx.commit()?;
+
+        Ok(SyncPacketImportResult {
+            source_device_id: packet.source.device_id.clone(),
+            source_device_name: packet.source.device_name.clone(),
+            imported_operations,
+            skipped_operations,
+            trusted_peer_added,
+        })
+    })();
+
+    match import_attempt {
+        Ok(result) => {
+            if result.imported_operations > 0 {
+                let retention = fetch_settings(&conn)?.backup_retention;
+                let _ = backup_database(&state.env, retention)?;
+            }
+            Ok(result)
+        }
+        Err(err) => {
+            let _ = upsert_sync_peer(&conn, &packet.source);
+            let _ = set_sync_peer_last_error(&conn, &packet.source.device_id, &err.to_string());
+            Err(err)
+        }
+    }
+}
+
+fn import_sync_packet_internal(state: &AppState, path: &str) -> AppResult<SyncPacketImportResult> {
+    let payload = fs::read_to_string(path).with_context(|| format!("Failed to read {path}"))?;
+    let packet: SyncPacket = serde_json::from_str(&payload)?;
+    import_sync_packet_value_internal(state, packet)
+}
+
+fn process_sync_inbox_internal(state: &AppState) -> AppResult<SyncInboxProcessResult> {
+    ensure_environment(state)?;
+    let inbox_dir = sync_inbox_dir(&state.env);
+    let archive_dir = sync_archive_dir(&state.env);
+    let failed_dir = sync_failed_dir(&state.env);
+    let files = list_sync_packet_files(&inbox_dir)?;
+    let mut result = SyncInboxProcessResult {
+        inbox_path: inbox_dir.to_string_lossy().to_string(),
+        archive_path: archive_dir.to_string_lossy().to_string(),
+        failed_path: failed_dir.to_string_lossy().to_string(),
+        scanned_files: files.len() as u32,
+        processed_files: 0,
+        failed_files: 0,
+        imported_operations: 0,
+        skipped_operations: 0,
+    };
+
+    for file in files {
+        let import_result = import_sync_packet_internal(state, &file.to_string_lossy());
+        match import_result {
+            Ok(imported) => {
+                result.processed_files += 1;
+                result.imported_operations += imported.imported_operations;
+                result.skipped_operations += imported.skipped_operations;
+                move_sync_packet_file(&file, &archive_dir)?;
+            }
+            Err(_) => {
+                result.failed_files += 1;
+                move_sync_packet_file(&file, &failed_dir)?;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn discover_lan_peers_internal(state: &AppState) -> AppResult<Vec<LanPeerCandidate>> {
+    ensure_environment(state)?;
+    let conn = open_connection(&state.env.db_path)?;
+    let local_identity = fetch_sync_device_identity(&conn)?;
+    drop(conn);
+
+    let socket =
+        UdpSocket::bind(("0.0.0.0", 0)).context("Failed to bind a UDP discovery socket.")?;
+    socket.set_broadcast(true)?;
+    socket.set_read_timeout(Some(StdDuration::from_millis(350)))?;
+
+    let response_port = socket.local_addr()?.port();
+    let request = LanDiscoveryRequest {
+        app: SYNC_PACKET_APP_NAME.to_string(),
+        schema_version: SYNC_PACKET_SCHEMA_VERSION,
+        request_id: Uuid::new_v4().to_string(),
+        response_port,
+        source: local_identity.clone(),
+    };
+
+    socket.send_to(
+        &serde_json::to_vec(&request)?,
+        ("255.255.255.255", SYNC_DISCOVERY_PORT),
+    )?;
+
+    let start = std::time::Instant::now();
+    let mut buffer = [0u8; 4096];
+    let mut discovered = HashMap::<String, LanPeerCandidate>::new();
+
+    while start.elapsed() < StdDuration::from_secs(2) {
+        match socket.recv_from(&mut buffer) {
+            Ok((bytes, sender)) => {
+                let response: LanDiscoveryResponse = match serde_json::from_slice(&buffer[..bytes])
+                {
+                    Ok(response) => response,
+                    Err(_) => continue,
+                };
+                if response.app != SYNC_PACKET_APP_NAME
+                    || response.schema_version != SYNC_PACKET_SCHEMA_VERSION
+                    || response.request_id != request.request_id
+                    || response.source.device_id == local_identity.device_id
+                {
+                    continue;
+                }
+
+                let conn = open_connection(&state.env.db_path)?;
+                let (trusted, last_sync_at_utc) =
+                    trusted_peer_snapshot(&conn, &response.source.device_id)?;
+                discovered.insert(
+                    response.source.device_id.clone(),
+                    LanPeerCandidate {
+                        device_id: response.source.device_id,
+                        device_name: response.source.device_name,
+                        address: sender.ip().to_string(),
+                        port: response.sync_port,
+                        trusted,
+                        last_sync_at_utc,
+                    },
+                );
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    let mut peers = discovered.into_values().collect::<Vec<_>>();
+    peers.sort_by(|left, right| left.device_name.cmp(&right.device_name));
+    Ok(peers)
+}
+
+fn sync_with_lan_peer_internal(
+    state: &AppState,
+    input: LanSyncSendInput,
+) -> AppResult<LanSyncSendResult> {
+    ensure_environment(state)?;
+    let conn = open_connection(&state.env.db_path)?;
+    let packet = build_sync_packet(&conn)?;
+    let sent_operations = packet.operations.len() as u32;
+    let last_sent_seq = current_sync_outbox_max_seq(&conn)?;
+    drop(conn);
+
+    let mut stream = TcpStream::connect((input.address.as_str(), input.port))
+        .with_context(|| format!("Failed to connect to {}:{}.", input.address, input.port))?;
+    stream.set_read_timeout(Some(StdDuration::from_secs(10)))?;
+    stream.set_write_timeout(Some(StdDuration::from_secs(10)))?;
+
+    let request = LanSyncRequest {
+        app: SYNC_PACKET_APP_NAME.to_string(),
+        schema_version: SYNC_PACKET_SCHEMA_VERSION,
+        packet,
+    };
+    stream.write_all(&serde_json::to_vec(&request)?)?;
+    stream.shutdown(Shutdown::Write)?;
+
+    let mut payload = Vec::new();
+    stream.read_to_end(&mut payload)?;
+    let response: LanSyncResponse = serde_json::from_slice(&payload)?;
+    if !response.ok {
+        return Err(anyhow!(
+            "{}",
+            response
+                .error
+                .unwrap_or_else(|| "Direct LAN sync was rejected.".to_string())
+        ));
+    }
+
+    let conn = open_connection(&state.env.db_path)?;
+    record_successful_outbound_sync(&conn, &response.source, last_sent_seq)?;
+
+    Ok(LanSyncSendResult {
+        peer_device_id: response.source.device_id,
+        peer_device_name: response.source.device_name,
+        address: input.address,
+        port: input.port,
+        sent_operations,
+        peer_imported_operations: response.imported_operations,
+        peer_skipped_operations: response.skipped_operations,
+    })
+}
+
 fn restore_backup_internal(state: &AppState, backup_path: &str) -> AppResult<()> {
     ensure_environment(state)?;
     let backup_path = validate_restore_backup_path(&state.env, Path::new(backup_path))?;
@@ -2547,6 +3954,7 @@ fn restore_backup_internal(state: &AppState, backup_path: &str) -> AppResult<()>
 
 fn bootstrap_state_internal(state: &AppState) -> AppResult<BootstrapState> {
     ensure_environment(state)?;
+    let _ = process_sync_inbox_internal(state)?;
     let mut conn = open_connection(&state.env.db_path)?;
     let auto_applied = apply_due_today_internal(&mut conn, today_local())?;
     let settings = fetch_settings(&conn)?;
@@ -2562,6 +3970,7 @@ fn bootstrap_state_internal(state: &AppState) -> AppResult<BootstrapState> {
         insight_snapshot: calculate_snapshot(&conn)?,
         backup_files: list_backups_internal(&state.env)?,
         migration_status: migration_status(&conn, &state.env)?,
+        local_sync: fetch_local_sync_state(&conn, state)?,
         recovery_notice: state
             .runtime
             .lock()
@@ -2597,8 +4006,12 @@ fn create_account(
         created_at: now_local_iso(),
         current_balance: input.opening_balance,
     };
-    let conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
-    insert_account_raw(&conn, &account).map_err(|err| err.to_string())?;
+    let mut conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    insert_account_raw(&tx, &account).map_err(|err| err.to_string())?;
+    queue_sync_outbox(&tx, "account", &account.id, "upsert", &account)
+        .map_err(|err| err.to_string())?;
+    tx.commit().map_err(|err| err.to_string())?;
     let retention = fetch_settings(&conn)
         .map_err(|err| err.to_string())?
         .backup_retention;
@@ -2620,7 +4033,7 @@ fn update_account(
     input: UpdateAccountInput,
 ) -> Result<Account, String> {
     ensure_environment(&state).map_err(|err| err.to_string())?;
-    let conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
+    let mut conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
     let current = fetch_accounts(&conn)
         .map_err(|err| err.to_string())?
         .into_iter()
@@ -2633,7 +4046,11 @@ fn update_account(
         current_balance: current.current_balance,
         ..current.clone()
     };
-    insert_account_raw(&conn, &updated).map_err(|err| err.to_string())?;
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    insert_account_raw(&tx, &updated).map_err(|err| err.to_string())?;
+    queue_sync_outbox(&tx, "account", &updated.id, "upsert", &updated)
+        .map_err(|err| err.to_string())?;
+    tx.commit().map_err(|err| err.to_string())?;
     push_undo(
         &state,
         UndoAction::ReplaceAccount {
@@ -2683,7 +4100,7 @@ fn create_entry(
     if input.entry_kind == EntryKind::Transfer {
         return Err("Use create_transfer for linked transfers between accounts.".to_string());
     }
-    let conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
+    let mut conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
     require_active_account(&conn, &input.account_id).map_err(|err| err.to_string())?;
     let entry = LedgerEntry {
         id: Uuid::new_v4().to_string(),
@@ -2698,7 +4115,11 @@ fn create_entry(
         transfer_group_id: None,
         exclude_from_insights: input.exclude_from_insights.unwrap_or(false),
     };
-    insert_entry_raw(&conn, &entry).map_err(|err| err.to_string())?;
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    insert_entry_raw(&tx, &entry).map_err(|err| err.to_string())?;
+    queue_sync_outbox(&tx, "ledger_entry", &entry.id, "upsert", &entry)
+        .map_err(|err| err.to_string())?;
+    tx.commit().map_err(|err| err.to_string())?;
     push_undo(
         &state,
         UndoAction::DeleteEntries {
@@ -2719,7 +4140,7 @@ fn update_entry(
     input: UpdateEntryInput,
 ) -> Result<LedgerEntry, String> {
     ensure_environment(&state).map_err(|err| err.to_string())?;
-    let conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
+    let mut conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
     let previous = fetch_entry_by_id(&conn, &entry_id)
         .map_err(|err| err.to_string())?
         .ok_or_else(|| "Entry not found".to_string())?;
@@ -2747,7 +4168,11 @@ fn update_entry(
         exclude_from_insights: input.exclude_from_insights,
         ..previous.clone()
     };
-    insert_entry_raw(&conn, &updated).map_err(|err| err.to_string())?;
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    insert_entry_raw(&tx, &updated).map_err(|err| err.to_string())?;
+    queue_sync_outbox(&tx, "ledger_entry", &updated.id, "upsert", &updated)
+        .map_err(|err| err.to_string())?;
+    tx.commit().map_err(|err| err.to_string())?;
     push_undo(
         &state,
         UndoAction::ReplaceEntry {
@@ -2777,10 +4202,28 @@ fn delete_entry(state: State<'_, AppState>, entry_id: String) -> Result<(), Stri
         for transfer_entry in transfer_entries {
             delete_entry_raw(&tx, &transfer_entry.id).map_err(|err| err.to_string())?;
         }
+        queue_sync_outbox_value(
+            &tx,
+            "transfer_group",
+            &group_id,
+            "delete",
+            json!({ "transfer_group_id": group_id.clone() }),
+        )
+        .map_err(|err| err.to_string())?;
         tx.commit().map_err(|err| err.to_string())?;
         push_undo(&state, UndoAction::RestoreSnapshot { payload: snapshot });
     } else {
-        delete_entry_raw(&conn, &entry_id).map_err(|err| err.to_string())?;
+        let tx = conn.transaction().map_err(|err| err.to_string())?;
+        delete_entry_raw(&tx, &entry_id).map_err(|err| err.to_string())?;
+        queue_sync_outbox_value(
+            &tx,
+            "ledger_entry",
+            &entry_id,
+            "delete",
+            json!({ "id": entry_id }),
+        )
+        .map_err(|err| err.to_string())?;
+        tx.commit().map_err(|err| err.to_string())?;
         push_undo(&state, UndoAction::DeleteEntry { entry: previous });
     }
     let retention = fetch_settings(&conn)
@@ -2835,6 +4278,17 @@ fn create_transfer(
     let tx = conn.transaction().map_err(|err| err.to_string())?;
     insert_entry_raw(&tx, &out_entry).map_err(|err| err.to_string())?;
     insert_entry_raw(&tx, &in_entry).map_err(|err| err.to_string())?;
+    queue_sync_outbox_value(
+        &tx,
+        "transfer_group",
+        out_entry
+            .transfer_group_id
+            .as_deref()
+            .ok_or_else(|| "Transfer group is missing".to_string())?,
+        "upsert",
+        json!({ "entries": [out_entry.clone(), in_entry.clone()] }),
+    )
+    .map_err(|err| err.to_string())?;
     tx.commit().map_err(|err| err.to_string())?;
     push_undo(
         &state,
@@ -2855,7 +4309,7 @@ fn reconcile_account(
     input: ReconcileAccountInput,
 ) -> Result<LedgerEntry, String> {
     ensure_environment(&state).map_err(|err| err.to_string())?;
-    let conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
+    let mut conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
     let account =
         require_active_account(&conn, &input.account_id).map_err(|err| err.to_string())?;
     let delta = input.actual_balance - account.current_balance;
@@ -2875,7 +4329,11 @@ fn reconcile_account(
         transfer_group_id: None,
         exclude_from_insights: true,
     };
-    insert_entry_raw(&conn, &entry).map_err(|err| err.to_string())?;
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    insert_entry_raw(&tx, &entry).map_err(|err| err.to_string())?;
+    queue_sync_outbox(&tx, "ledger_entry", &entry.id, "upsert", &entry)
+        .map_err(|err| err.to_string())?;
+    tx.commit().map_err(|err| err.to_string())?;
     push_undo(
         &state,
         UndoAction::DeleteEntries {
@@ -2904,7 +4362,7 @@ fn create_recurring_rule(
     if input.entry_kind == EntryKind::Transfer {
         return Err("Transfers cannot be created as recurring rules.".to_string());
     }
-    let conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
+    let mut conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
     require_active_account(&conn, &input.account_id).map_err(|err| err.to_string())?;
     let rule = RecurringRule {
         id: Uuid::new_v4().to_string(),
@@ -2920,7 +4378,11 @@ fn create_recurring_rule(
         status: input.status,
         last_applied_local: None,
     };
-    insert_rule_raw(&conn, &rule).map_err(|err| err.to_string())?;
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    insert_rule_raw(&tx, &rule).map_err(|err| err.to_string())?;
+    queue_sync_outbox(&tx, "recurring_rule", &rule.id, "upsert", &rule)
+        .map_err(|err| err.to_string())?;
+    tx.commit().map_err(|err| err.to_string())?;
     push_undo(
         &state,
         UndoAction::ReplaceRecurring {
@@ -2945,7 +4407,7 @@ fn update_recurring_rule(
     if input.entry_kind == EntryKind::Transfer {
         return Err("Transfers cannot be created as recurring rules.".to_string());
     }
-    let conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
+    let mut conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
     require_active_account(&conn, &input.account_id).map_err(|err| err.to_string())?;
     let current = fetch_recurring_rules(&conn)
         .map_err(|err| err.to_string())?
@@ -2966,7 +4428,11 @@ fn update_recurring_rule(
         status: input.status,
         last_applied_local: current.last_applied_local.clone(),
     };
-    insert_rule_raw(&conn, &updated).map_err(|err| err.to_string())?;
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    insert_rule_raw(&tx, &updated).map_err(|err| err.to_string())?;
+    queue_sync_outbox(&tx, "recurring_rule", &updated.id, "upsert", &updated)
+        .map_err(|err| err.to_string())?;
+    tx.commit().map_err(|err| err.to_string())?;
     push_undo(
         &state,
         UndoAction::ReplaceRecurring {
@@ -2984,13 +4450,23 @@ fn update_recurring_rule(
 #[tauri::command]
 fn delete_recurring_rule(state: State<'_, AppState>, rule_id: String) -> Result<(), String> {
     ensure_environment(&state).map_err(|err| err.to_string())?;
-    let conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
+    let mut conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
     let current = fetch_recurring_rules(&conn)
         .map_err(|err| err.to_string())?
         .into_iter()
         .find(|rule| rule.id == rule_id)
         .ok_or_else(|| "Recurring rule not found".to_string())?;
-    delete_rule_raw(&conn, &rule_id).map_err(|err| err.to_string())?;
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    delete_rule_raw(&tx, &rule_id).map_err(|err| err.to_string())?;
+    queue_sync_outbox_value(
+        &tx,
+        "recurring_rule",
+        &rule_id,
+        "delete",
+        json!({ "id": rule_id.clone() }),
+    )
+    .map_err(|err| err.to_string())?;
+    tx.commit().map_err(|err| err.to_string())?;
     push_undo(
         &state,
         UndoAction::ReplaceRecurring {
@@ -3037,7 +4513,7 @@ fn set_monthly_cap(
     input: MonthlyCapInput,
 ) -> Result<MonthlyCap, String> {
     ensure_environment(&state).map_err(|err| err.to_string())?;
-    let conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
+    let mut conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
     let current = fetch_monthly_caps(&conn)
         .map_err(|err| err.to_string())?
         .into_iter()
@@ -3051,7 +4527,11 @@ fn set_monthly_cap(
         amount: input.amount,
         month_key: input.month_key,
     };
-    insert_cap_raw(&conn, &cap).map_err(|err| err.to_string())?;
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    insert_cap_raw(&tx, &cap).map_err(|err| err.to_string())?;
+    queue_sync_outbox(&tx, "monthly_cap", &cap.id, "upsert", &cap)
+        .map_err(|err| err.to_string())?;
+    tx.commit().map_err(|err| err.to_string())?;
     push_undo(
         &state,
         UndoAction::ReplaceCap {
@@ -3069,13 +4549,23 @@ fn set_monthly_cap(
 #[tauri::command]
 fn delete_monthly_cap(state: State<'_, AppState>, cap_id: String) -> Result<(), String> {
     ensure_environment(&state).map_err(|err| err.to_string())?;
-    let conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
+    let mut conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
     let current = fetch_monthly_caps(&conn)
         .map_err(|err| err.to_string())?
         .into_iter()
         .find(|cap| cap.id == cap_id)
         .ok_or_else(|| "Monthly cap not found".to_string())?;
-    delete_cap_raw(&conn, &cap_id).map_err(|err| err.to_string())?;
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    delete_cap_raw(&tx, &cap_id).map_err(|err| err.to_string())?;
+    queue_sync_outbox_value(
+        &tx,
+        "monthly_cap",
+        &cap_id,
+        "delete",
+        json!({ "id": cap_id.clone() }),
+    )
+    .map_err(|err| err.to_string())?;
+    tx.commit().map_err(|err| err.to_string())?;
     push_undo(
         &state,
         UndoAction::ReplaceCap {
@@ -3170,19 +4660,87 @@ fn update_app_settings(
     ensure_environment(&state).map_err(|err| err.to_string())?;
     validate_settings_input(&input).map_err(|err| err.to_string())?;
 
-    let conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
+    let mut conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
     let current = fetch_settings(&conn).map_err(|err| err.to_string())?;
     let updated = AppSettings {
-        school_year_start_month: input.school_year_start_month,
+        school_year_start_month: start_month_from_month_key(&input.planning_start_month_key)
+            .map_err(|err| err.to_string())?,
+        planning_start_month_key: canonical_month_key(
+            parse_month_start(&input.planning_start_month_key).map_err(|err| err.to_string())?,
+        ),
         school_year_months: input.school_year_months,
         language: current.language,
         backup_retention: input.backup_retention,
         last_migration_version: current.last_migration_version,
     };
 
-    update_settings_row(&conn, &updated).map_err(|err| err.to_string())?;
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    update_settings_row(&tx, &updated).map_err(|err| err.to_string())?;
+    queue_sync_outbox(&tx, "shared_settings", "app_settings", "upsert", &updated)
+        .map_err(|err| err.to_string())?;
+    tx.commit().map_err(|err| err.to_string())?;
     let _ = backup_database(&state.env, updated.backup_retention).map_err(|err| err.to_string())?;
     Ok(updated)
+}
+
+#[tauri::command]
+fn update_local_sync_device_name(
+    state: State<'_, AppState>,
+    input: UpdateLocalSyncDeviceNameInput,
+) -> Result<LocalSyncState, String> {
+    ensure_environment(&state).map_err(|err| err.to_string())?;
+    let conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
+    update_local_sync_device_name_row(&conn, &input.device_name).map_err(|err| err.to_string())?;
+    fetch_local_sync_state(&conn, &state).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn export_sync_packet(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<SyncPacketExportResult, String> {
+    export_sync_packet_internal(&state, &path).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn import_sync_packet(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<SyncPacketImportResult, String> {
+    import_sync_packet_internal(&state, &path).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn export_sync_packet_for_localsend(
+    state: State<'_, AppState>,
+) -> Result<SyncPacketLaunchResult, String> {
+    export_sync_packet_for_localsend_internal(&state).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn process_sync_inbox(state: State<'_, AppState>) -> Result<SyncInboxProcessResult, String> {
+    process_sync_inbox_internal(&state).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn open_sync_inbox_folder(state: State<'_, AppState>) -> Result<String, String> {
+    ensure_environment(&state).map_err(|err| err.to_string())?;
+    let inbox_dir = sync_inbox_dir(&state.env);
+    open_directory_in_explorer(&inbox_dir).map_err(|err| err.to_string())?;
+    Ok(inbox_dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn discover_lan_peers(state: State<'_, AppState>) -> Result<Vec<LanPeerCandidate>, String> {
+    discover_lan_peers_internal(&state).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn sync_with_lan_peer(
+    state: State<'_, AppState>,
+    input: LanSyncSendInput,
+) -> Result<LanSyncSendResult, String> {
+    sync_with_lan_peer_internal(&state, input).map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -3211,6 +4769,10 @@ fn reset_all_data(state: State<'_, AppState>) -> Result<(), String> {
         &json!({
             "settings": AppSettings {
                 school_year_start_month: DEFAULT_SCHOOL_YEAR_START_MONTH,
+                planning_start_month_key: planning_start_month_key_from_legacy_month(
+                    DEFAULT_SCHOOL_YEAR_START_MONTH,
+                    today_local(),
+                ),
                 school_year_months: DEFAULT_SCHOOL_YEAR_MONTHS,
                 language: "EN".to_string(),
                 backup_retention: DEFAULT_BACKUP_RETENTION,
@@ -3462,6 +5024,7 @@ mod tests {
     fn school_year_months_default_to_september_start() {
         let settings = AppSettings {
             school_year_start_month: 9,
+            planning_start_month_key: "2025-09".into(),
             school_year_months: 9,
             language: "EN".into(),
             backup_retention: 50,
@@ -3473,9 +5036,10 @@ mod tests {
     }
 
     #[test]
-    fn planning_window_months_follow_the_focus_month_forward() {
+    fn planning_window_months_follow_the_configured_start_month() {
         let settings = AppSettings {
             school_year_start_month: 9,
+            planning_start_month_key: "2025-09".into(),
             school_year_months: 5,
             language: "EN".into(),
             backup_retention: 50,
@@ -3495,11 +5059,11 @@ mod tests {
         assert_eq!(
             query.range_months,
             vec![
-                "2026-04".to_string(),
-                "2026-05".to_string(),
-                "2026-06".to_string(),
-                "2026-07".to_string(),
-                "2026-08".to_string()
+                "2025-09".to_string(),
+                "2025-10".to_string(),
+                "2025-11".to_string(),
+                "2025-12".to_string(),
+                "2026-01".to_string(),
             ]
         );
     }
@@ -3507,23 +5071,280 @@ mod tests {
     #[test]
     fn settings_validation_rejects_out_of_range_values() {
         assert!(validate_settings_input(&UpdateSettingsInput {
-            school_year_start_month: 0,
+            planning_start_month_key: "bad-value".into(),
             school_year_months: 9,
             backup_retention: 50,
         })
         .is_err());
         assert!(validate_settings_input(&UpdateSettingsInput {
-            school_year_start_month: 9,
+            planning_start_month_key: "2025-09".into(),
             school_year_months: 13,
             backup_retention: 50,
         })
         .is_err());
         assert!(validate_settings_input(&UpdateSettingsInput {
-            school_year_start_month: 9,
+            planning_start_month_key: "2025-09".into(),
             school_year_months: 9,
             backup_retention: 0,
         })
         .is_err());
+    }
+
+    #[test]
+    fn local_sync_state_bootstraps_device_and_counts_pending_operations() {
+        let base_dir = temp_test_dir("sbt_local_sync_state");
+        let state = make_test_state(&base_dir);
+        fs::create_dir_all(sync_inbox_dir(&state.env)).unwrap();
+        let conn = open_connection(&state.env.db_path).unwrap();
+        init_schema(&conn).unwrap();
+
+        let sync_state = fetch_local_sync_state(&conn, &state).unwrap();
+        assert!(!sync_state.device_id.is_empty());
+        assert!(!sync_state.device_name.is_empty());
+        assert_eq!(sync_state.pending_operations, 0);
+        assert_eq!(sync_state.inbox_packet_count, 0);
+        assert!(sync_state.trusted_peers.is_empty());
+
+        queue_sync_outbox_value(
+            &conn,
+            "ledger_entry",
+            "entry-1",
+            "upsert",
+            json!({ "id": "entry-1" }),
+        )
+        .unwrap();
+
+        let updated = fetch_local_sync_state(&conn, &state).unwrap();
+        assert_eq!(updated.pending_operations, 1);
+
+        let _ = fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
+    fn update_local_sync_device_name_rejects_blank_values() {
+        let base_dir = temp_test_dir("sbt_sync_device_name");
+        let state = make_test_state(&base_dir);
+        let conn = open_connection(&state.env.db_path).unwrap();
+        init_schema(&conn).unwrap();
+
+        assert!(update_local_sync_device_name_row(&conn, "   ").is_err());
+        update_local_sync_device_name_row(&conn, "Dorm desktop").unwrap();
+
+        let updated = fetch_local_sync_state(&conn, &state).unwrap();
+        assert_eq!(updated.device_name, "Dorm desktop");
+
+        let _ = fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
+    fn default_sync_packet_path_uses_sync_packets_directory() {
+        let base_dir = temp_test_dir("sbt_sync_packet_path");
+        let env = make_test_env(&base_dir);
+        let path = default_sync_packet_path(&env);
+
+        assert!(path.starts_with(sync_packets_dir(&env)));
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("json"));
+        assert!(path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap()
+            .starts_with("student-budget-sync_"));
+
+        let _ = fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
+    fn export_sync_packet_writes_device_metadata_and_operations() {
+        let base_dir = temp_test_dir("sbt_sync_export");
+        let state = make_test_state(&base_dir);
+        ensure_environment(&state).unwrap();
+
+        let conn = open_connection(&state.env.db_path).unwrap();
+        let account = Account {
+            id: "sync-account".into(),
+            name: "Checking".into(),
+            r#type: AccountType::Checking,
+            opening_balance: 150.0,
+            archived: false,
+            created_at: "2026-04-21T09:00:00".into(),
+            current_balance: 150.0,
+        };
+        insert_account_raw(&conn, &account).unwrap();
+        queue_sync_outbox(&conn, "account", &account.id, "upsert", &account).unwrap();
+
+        let export_path = base_dir.join("outgoing-sync.json");
+        let result = export_sync_packet_internal(&state, &export_path.to_string_lossy()).unwrap();
+        let packet: SyncPacket =
+            serde_json::from_str(&fs::read_to_string(&export_path).unwrap()).unwrap();
+
+        assert_eq!(result.operation_count, 1);
+        assert_eq!(packet.app, SYNC_PACKET_APP_NAME);
+        assert_eq!(packet.schema_version, SYNC_PACKET_SCHEMA_VERSION);
+        assert_eq!(packet.operations.len(), 1);
+        assert_eq!(packet.operations[0].entity_type, "account");
+        assert_eq!(packet.operations[0].entity_id, "sync-account");
+        assert_eq!(packet.operations[0].device_id, packet.source.device_id);
+
+        let _ = fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
+    fn import_sync_packet_roundtrips_once_and_skips_duplicates() {
+        let source_dir = temp_test_dir("sbt_sync_source");
+        let source_state = make_test_state(&source_dir);
+        ensure_environment(&source_state).unwrap();
+
+        let source_conn = open_connection(&source_state.env.db_path).unwrap();
+        let account = Account {
+            id: "primary".into(),
+            name: "Primary Account".into(),
+            r#type: AccountType::Checking,
+            opening_balance: 400.0,
+            archived: false,
+            created_at: "2026-04-21T09:00:00".into(),
+            current_balance: 400.0,
+        };
+        let entry = LedgerEntry {
+            id: "food-1".into(),
+            account_id: account.id.clone(),
+            entry_kind: EntryKind::Expense,
+            amount: 42.0,
+            occurred_at_local: "2026-04-21T12:00:00".into(),
+            label: "Groceries".into(),
+            category: "food".into(),
+            notes: "".into(),
+            recurring_rule_id: None,
+            transfer_group_id: None,
+            exclude_from_insights: false,
+        };
+        insert_account_raw(&source_conn, &account).unwrap();
+        queue_sync_outbox(&source_conn, "account", &account.id, "upsert", &account).unwrap();
+        insert_entry_raw(&source_conn, &entry).unwrap();
+        queue_sync_outbox(&source_conn, "ledger_entry", &entry.id, "upsert", &entry).unwrap();
+
+        let packet_path = source_dir.join("sync.json");
+        export_sync_packet_internal(&source_state, &packet_path.to_string_lossy()).unwrap();
+
+        let target_dir = temp_test_dir("sbt_sync_target");
+        let target_state = make_test_state(&target_dir);
+        ensure_environment(&target_state).unwrap();
+
+        let first =
+            import_sync_packet_internal(&target_state, &packet_path.to_string_lossy()).unwrap();
+        assert_eq!(first.imported_operations, 2);
+        assert_eq!(first.skipped_operations, 0);
+        assert!(first.trusted_peer_added);
+
+        let target_conn = open_connection(&target_state.env.db_path).unwrap();
+        let accounts = fetch_accounts(&target_conn).unwrap();
+        let entries = fetch_entries(&target_conn).unwrap();
+        let sync_state = fetch_local_sync_state(&target_conn, &target_state).unwrap();
+        assert!(accounts.iter().any(|item| item.id == "primary"));
+        assert!(entries.iter().any(|item| item.id == "food-1"));
+        assert_eq!(sync_state.trusted_peers.len(), 1);
+        assert_eq!(
+            sync_state.trusted_peers[0].device_name,
+            first.source_device_name
+        );
+        let entry_count_after_first_import = entries.len();
+        drop(target_conn);
+
+        let second =
+            import_sync_packet_internal(&target_state, &packet_path.to_string_lossy()).unwrap();
+        let target_conn = open_connection(&target_state.env.db_path).unwrap();
+        let entries_after_second = fetch_entries(&target_conn).unwrap();
+        assert_eq!(second.imported_operations, 0);
+        assert_eq!(second.skipped_operations, 2);
+        assert_eq!(entries_after_second.len(), entry_count_after_first_import);
+
+        let _ = fs::remove_dir_all(source_dir);
+        let _ = fs::remove_dir_all(target_dir);
+    }
+
+    #[test]
+    fn process_sync_inbox_imports_packets_and_archives_files() {
+        let source_dir = temp_test_dir("sbt_sync_inbox_source");
+        let source_state = make_test_state(&source_dir);
+        ensure_environment(&source_state).unwrap();
+
+        let source_conn = open_connection(&source_state.env.db_path).unwrap();
+        let account = Account {
+            id: "shared-checking".into(),
+            name: "Shared Checking".into(),
+            r#type: AccountType::Checking,
+            opening_balance: 500.0,
+            archived: false,
+            created_at: "2026-04-21T09:00:00".into(),
+            current_balance: 500.0,
+        };
+        insert_account_raw(&source_conn, &account).unwrap();
+        queue_sync_outbox(&source_conn, "account", &account.id, "upsert", &account).unwrap();
+
+        let packet_path = source_dir.join("sync-inbox-packet.json");
+        export_sync_packet_internal(&source_state, &packet_path.to_string_lossy()).unwrap();
+
+        let target_dir = temp_test_dir("sbt_sync_inbox_target");
+        let target_state = make_test_state(&target_dir);
+        ensure_environment(&target_state).unwrap();
+        let inbox_path = sync_inbox_dir(&target_state.env).join("incoming.json");
+        fs::copy(&packet_path, &inbox_path).unwrap();
+
+        let result = process_sync_inbox_internal(&target_state).unwrap();
+
+        assert_eq!(result.scanned_files, 1);
+        assert_eq!(result.processed_files, 1);
+        assert_eq!(result.failed_files, 0);
+        assert_eq!(result.imported_operations, 1);
+        assert_eq!(
+            list_sync_packet_files(&sync_inbox_dir(&target_state.env))
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            list_sync_packet_files(&sync_archive_dir(&target_state.env))
+                .unwrap()
+                .len(),
+            1
+        );
+        let target_conn = open_connection(&target_state.env.db_path).unwrap();
+        assert!(fetch_accounts(&target_conn)
+            .unwrap()
+            .iter()
+            .any(|item| item.id == "shared-checking"));
+
+        let _ = fs::remove_dir_all(source_dir);
+        let _ = fs::remove_dir_all(target_dir);
+    }
+
+    #[test]
+    fn process_sync_inbox_moves_invalid_packets_to_failed_folder() {
+        let base_dir = temp_test_dir("sbt_sync_inbox_invalid");
+        let state = make_test_state(&base_dir);
+        ensure_environment(&state).unwrap();
+
+        let invalid_packet_path = sync_inbox_dir(&state.env).join("broken.json");
+        fs::write(&invalid_packet_path, "{not-json").unwrap();
+
+        let result = process_sync_inbox_internal(&state).unwrap();
+
+        assert_eq!(result.scanned_files, 1);
+        assert_eq!(result.processed_files, 0);
+        assert_eq!(result.failed_files, 1);
+        assert_eq!(
+            list_sync_packet_files(&sync_inbox_dir(&state.env))
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            list_sync_packet_files(&sync_failed_dir(&state.env))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let _ = fs::remove_dir_all(base_dir);
     }
 
     #[test]
@@ -3975,6 +5796,103 @@ mod tests {
     }
 
     #[test]
+    fn school_year_snapshot_keeps_history_visible_and_projects_from_current_balance() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let current_month = current_month_key();
+        let current_month_start = parse_month_start(&current_month).unwrap();
+        let previous_month_start = add_months(current_month_start, -1);
+        let previous_month = format!(
+            "{}-{:02}",
+            previous_month_start.year(),
+            previous_month_start.month()
+        );
+
+        update_settings_row(
+            &conn,
+            &AppSettings {
+                school_year_start_month: previous_month_start.month(),
+                planning_start_month_key: previous_month.clone(),
+                school_year_months: 2,
+                language: "EN".into(),
+                backup_retention: 50,
+                last_migration_version: 2,
+            },
+        )
+        .unwrap();
+
+        insert_account_raw(
+            &conn,
+            &Account {
+                id: "account-a".into(),
+                name: "Checking".into(),
+                r#type: AccountType::Checking,
+                opening_balance: 1000.0,
+                archived: false,
+                created_at: "2026-01-01T09:00:00".into(),
+                current_balance: 1000.0,
+            },
+        )
+        .unwrap();
+        insert_entry_raw(
+            &conn,
+            &LedgerEntry {
+                id: "prev-expense".into(),
+                account_id: "account-a".into(),
+                entry_kind: EntryKind::Expense,
+                amount: 50.0,
+                occurred_at_local: date_to_occurrence_iso(previous_month_start),
+                label: "Books".into(),
+                category: "school".into(),
+                notes: "".into(),
+                recurring_rule_id: None,
+                transfer_group_id: None,
+                exclude_from_insights: false,
+            },
+        )
+        .unwrap();
+        insert_entry_raw(
+            &conn,
+            &LedgerEntry {
+                id: "current-expense".into(),
+                account_id: "account-a".into(),
+                entry_kind: EntryKind::Expense,
+                amount: 100.0,
+                occurred_at_local: date_to_occurrence_iso(current_month_start),
+                label: "Groceries".into(),
+                category: "food".into(),
+                notes: "".into(),
+                recurring_rule_id: None,
+                transfer_group_id: None,
+                exclude_from_insights: false,
+            },
+        )
+        .unwrap();
+        insert_cap_raw(
+            &conn,
+            &MonthlyCap {
+                id: "current-food-cap".into(),
+                category: "food".into(),
+                amount: 150.0,
+                month_key: current_month.clone(),
+            },
+        )
+        .unwrap();
+
+        let snapshot = calculate_snapshot(&conn).unwrap();
+
+        assert_eq!(snapshot.total_available_cash, 850.0);
+        assert_eq!(snapshot.school_year_runway_remaining, 850.0);
+        assert_eq!(snapshot.projected_end_of_year_cushion, 800.0);
+        assert_eq!(snapshot.monthly_series.len(), 2);
+        assert_eq!(snapshot.monthly_series[0].month_key, previous_month);
+        assert_eq!(snapshot.monthly_series[0].runway_balance, 950.0);
+        assert_eq!(snapshot.monthly_series[1].month_key, current_month);
+        assert_eq!(snapshot.monthly_series[1].runway_balance, 800.0);
+    }
+
+    #[test]
     fn breakdown_for_metric_uses_month_context() {
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
@@ -4184,6 +6102,7 @@ mod tests {
             &source_conn,
             &AppSettings {
                 school_year_start_month: 9,
+                planning_start_month_key: "2025-09".into(),
                 school_year_months: 9,
                 language: "EN".into(),
                 backup_retention: 50,

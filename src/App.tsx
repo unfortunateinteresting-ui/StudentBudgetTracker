@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 
 import {
   applyMissedRecurring,
   bootstrapState,
   getCalculationBreakdown,
+  processSyncInbox,
   runStartupRecurringCheck,
 } from "./lib/api";
 import { applyThemeMode, readThemeMode } from "./lib/theme";
@@ -27,6 +29,9 @@ import { PlanPage } from "./pages/PlanPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import styles from "./App.module.css";
 
+const SYNC_EVENT_UPDATED = "sync-updated";
+const SYNC_EVENT_ATTENTION = "sync-attention";
+
 export function App() {
   const [workspace, setWorkspace] = useState<Workspace>("home");
   const [theme, setTheme] = useState<ThemeMode>(() => readThemeMode());
@@ -38,6 +43,8 @@ export function App() {
   const [breakdown, setBreakdown] = useState<BreakdownResult | null>(null);
   const [missedRecurring, setMissedRecurring] = useState<MissedRecurringOccurrence[]>([]);
   const [applyingMissedRecurring, setApplyingMissedRecurring] = useState(false);
+  const [syncInboxAlert, setSyncInboxAlert] = useState<string>("");
+  const syncInboxBusyRef = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -58,6 +65,39 @@ export function App() {
     }
   }, []);
 
+  const scanSyncInbox = useCallback(
+    async (showFailureAlert = true) => {
+      if (syncInboxBusyRef.current) {
+        return;
+      }
+      syncInboxBusyRef.current = true;
+      try {
+        const result = await processSyncInbox();
+        if (result.failed_files > 0) {
+          if (showFailureAlert) {
+            setSyncInboxAlert(
+              `Sync inbox moved ${result.failed_files} file(s) to the failed folder. Open Settings > Local sync to review the paths.`,
+            );
+          }
+          await refresh();
+          return;
+        }
+        if (result.processed_files > 0) {
+          await refresh();
+        }
+      } catch {
+        if (showFailureAlert) {
+          setSyncInboxAlert(
+            "Automatic sync inbox scan failed. Open Settings > Local sync and run Scan inbox now.",
+          );
+        }
+      } finally {
+        syncInboxBusyRef.current = false;
+      }
+    },
+    [refresh],
+  );
+
   useEffect(() => {
     applyThemeMode(theme);
   }, [theme]);
@@ -72,6 +112,51 @@ export function App() {
     }, 60 * 60 * 1000);
 
     return () => window.clearInterval(interval);
+  }, [loadMissedRecurring, refresh]);
+
+  useEffect(() => {
+    const handleFocus = () => {
+      void scanSyncInbox(true);
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        void scanSyncInbox(true);
+      }
+    };
+
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [scanSyncInbox]);
+
+  useEffect(() => {
+    let unlistenUpdated: (() => void) | undefined;
+    let unlistenAttention: (() => void) | undefined;
+
+    void (async () => {
+      unlistenUpdated = await listen(SYNC_EVENT_UPDATED, async () => {
+        await refresh();
+        await loadMissedRecurring();
+      });
+      unlistenAttention = await listen<{ message?: string }>(SYNC_EVENT_ATTENTION, async (event) => {
+        const message =
+          typeof event.payload?.message === "string"
+            ? event.payload.message
+            : "Sync attention is required. Open Settings > Local sync for details.";
+        setSyncInboxAlert(message);
+        await refresh();
+      });
+    })();
+
+    return () => {
+      unlistenUpdated?.();
+      unlistenAttention?.();
+    };
   }, [loadMissedRecurring, refresh]);
 
   const openGuidedCreate = useCallback(() => {
@@ -137,6 +222,7 @@ export function App() {
         return (
           <SettingsPage
             backups={bootstrap.backup_files}
+            localSync={bootstrap.local_sync}
             migrationStatus={bootstrap.migration_status}
             onRefresh={refresh}
             recoveryNotice={bootstrap.recovery_notice}
@@ -166,6 +252,31 @@ export function App() {
       />
       <main className={styles.content}>
         <div className={styles.frame}>
+          {syncInboxAlert ? (
+            <div className={styles.topBanner}>
+              <div>
+                <div className={styles.topBannerTitle}>Sync inbox attention needed</div>
+                <div>{syncInboxAlert}</div>
+              </div>
+              <div className={styles.actions}>
+                <button
+                  className={styles.ghost}
+                  onClick={() => setSyncInboxAlert("")}
+                  type="button"
+                >
+                  Dismiss
+                </button>
+                <button
+                  className={styles.button}
+                  onClick={() => setWorkspace("settings")}
+                  type="button"
+                >
+                  Open settings
+                </button>
+              </div>
+            </div>
+          ) : null}
+
           <MissedRecurringBanner
             busy={applyingMissedRecurring}
             missedRecurring={missedRecurring}

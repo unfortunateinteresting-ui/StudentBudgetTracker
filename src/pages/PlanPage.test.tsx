@@ -130,6 +130,7 @@ const snapshot: InsightSnapshot = {
 
 const settings = {
   school_year_start_month: 9,
+  planning_start_month_key: "2026-09",
   school_year_months: 9,
   language: "en",
   backup_retention: 50,

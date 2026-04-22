@@ -92,7 +92,7 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
       <div className={styles.grid2}>
         <SectionCard
           eyebrow="Planning window"
-          title="Forward monthly spending, cap, and balance"
+          title="Monthly spending, cap, and end balance"
         >
           <LineChart data={snapshot.monthly_series} />
         </SectionCard>

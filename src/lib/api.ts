@@ -9,13 +9,21 @@ import type {
   CreateTransferInput,
   EntryFilters,
   InsightSnapshot,
+  LanPeerCandidate,
+  LanSyncSendInput,
+  LanSyncSendResult,
   MonthlyCap,
   MonthlyCapInput,
   RecurringRule,
   RecurringRuleInput,
   ReconcileAccountInput,
+  SyncInboxProcessResult,
+  SyncPacketExportResult,
+  SyncPacketImportResult,
+  SyncPacketLaunchResult,
   UpdateAccountInput,
   UpdateEntryInput,
+  UpdateLocalSyncDeviceNameInput,
   UpdateSettingsInput,
 } from "./types";
 
@@ -108,6 +116,30 @@ export const listBackups = () =>
 
 export const updateAppSettings = (input: UpdateSettingsInput) =>
   invoke("update_app_settings", { input });
+
+export const updateLocalSyncDeviceName = (input: UpdateLocalSyncDeviceNameInput) =>
+  invoke("update_local_sync_device_name", { input });
+
+export const exportSyncPacket = (path: string) =>
+  invoke<SyncPacketExportResult>("export_sync_packet", { path });
+
+export const importSyncPacket = (path: string) =>
+  invoke<SyncPacketImportResult>("import_sync_packet", { path });
+
+export const exportSyncPacketForLocalSend = () =>
+  invoke<SyncPacketLaunchResult>("export_sync_packet_for_localsend");
+
+export const processSyncInbox = () =>
+  invoke<SyncInboxProcessResult>("process_sync_inbox");
+
+export const openSyncInboxFolder = () =>
+  invoke<string>("open_sync_inbox_folder");
+
+export const discoverLanPeers = () =>
+  invoke<LanPeerCandidate[]>("discover_lan_peers");
+
+export const syncWithLanPeer = (input: LanSyncSendInput) =>
+  invoke<LanSyncSendResult>("sync_with_lan_peer", { input });
 
 export const createBackupNow = () =>
   invoke("create_backup_now");

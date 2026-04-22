@@ -92,6 +92,7 @@ export function PlanPage({
   onRefresh,
 }: PlanPageProps) {
   const currentMonth = currentMonthKey();
+  const planningStartMonth = settings.planning_start_month_key || currentMonth;
   const activeAccounts = useMemo(
     () => accounts.filter((account) => !account.archived),
     [accounts],
@@ -239,7 +240,7 @@ export function PlanPage({
     }
 
     return Array.from({ length: settings.school_year_months }, (_, index) => {
-      const monthKey = shiftMonthKey(currentMonth, index);
+      const monthKey = shiftMonthKey(planningStartMonth, index);
       return {
         month_key: monthKey,
         spent: 0,
@@ -247,16 +248,22 @@ export function PlanPage({
         runway_balance: snapshot.total_available_cash,
       };
     });
-  }, [currentMonth, settings.school_year_months, snapshot.monthly_series, snapshot.total_available_cash]);
+  }, [
+    planningStartMonth,
+    settings.school_year_months,
+    snapshot.monthly_series,
+    snapshot.total_available_cash,
+  ]);
 
   const planningWindowTitle = useMemo(() => {
     if (!planningMonths.length) {
-      return monthLabel(currentMonth);
+      return monthLabel(planningStartMonth);
     }
-    const firstMonth = planningMonths[0]?.month_key ?? currentMonth;
-    const lastMonth = planningMonths[planningMonths.length - 1]?.month_key ?? currentMonth;
+    const firstMonth = planningMonths[0]?.month_key ?? planningStartMonth;
+    const lastMonth =
+      planningMonths[planningMonths.length - 1]?.month_key ?? planningStartMonth;
     return `${monthLabel(firstMonth)} to ${monthLabel(lastMonth)}`;
-  }, [currentMonth, planningMonths]);
+  }, [planningMonths, planningStartMonth]);
 
   const runAction = async (work: () => Promise<unknown>, successText: string) => {
     try {

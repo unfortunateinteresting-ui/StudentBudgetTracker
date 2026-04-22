@@ -2,23 +2,45 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   createBackupNow,
+  discoverLanPeers,
   exportJsonV2,
+  exportSyncPacketForLocalSend,
+  exportSyncPacket,
   importJson,
+  importSyncPacket,
+  openSyncInboxFolder,
+  processSyncInbox,
   resetAllData,
   restoreBackup,
   runLegacyMigration,
+  syncWithLanPeer,
   undoLastAction,
   updateAppSettings,
+  updateLocalSyncDeviceName,
 } from "../lib/api";
-import { chooseJsonExportPath, chooseJsonImportPath } from "../lib/dialogs";
-import { currentMonthKey, monthLabel, shiftMonthKey } from "../lib/format";
-import type { AppSettings, BackupFile, MigrationStatus } from "../lib/types";
+import {
+  chooseJsonExportPath,
+  chooseJsonImportPath,
+  chooseSyncPacketExportPath,
+  chooseSyncPacketImportPath,
+} from "../lib/dialogs";
+import { monthLabel, shiftMonthKey } from "../lib/format";
+import type {
+  AppSettings,
+  BackupFile,
+  LanPeerCandidate,
+  LocalSyncState,
+  MigrationStatus,
+} from "../lib/types";
 import { MetricCard } from "../components/MetricCard";
 import { SectionCard } from "../components/SectionCard";
 import styles from "./Page.module.css";
 
+const isMonthKey = (value: string) => /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
+
 interface SettingsPageProps {
   backups: BackupFile[];
+  localSync: LocalSyncState;
   migrationStatus: MigrationStatus;
   recoveryNotice?: string | null;
   settings: AppSettings;
@@ -32,6 +54,7 @@ type NoticeState = {
 
 export function SettingsPage({
   backups,
+  localSync,
   migrationStatus,
   recoveryNotice,
   settings,
@@ -39,31 +62,62 @@ export function SettingsPage({
 }: SettingsPageProps) {
   const [exportPath, setExportPath] = useState("");
   const [importPath, setImportPath] = useState("");
+  const [syncExportPath, setSyncExportPath] = useState("");
+  const [syncImportPath, setSyncImportPath] = useState("");
   const [resetPhrase, setResetPhrase] = useState("");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [notice, setNotice] = useState<NoticeState | null>(null);
+  const [planningStartMonthKey, setPlanningStartMonthKey] = useState(
+    settings.planning_start_month_key,
+  );
+  const [deviceName, setDeviceName] = useState(localSync.device_name);
   const [schoolYearMonths, setSchoolYearMonths] = useState(settings.school_year_months);
   const [backupRetention, setBackupRetention] = useState(settings.backup_retention);
   const [pendingRestore, setPendingRestore] = useState<BackupFile | null>(null);
   const [restorePhrase, setRestorePhrase] = useState("");
+  const [discoveredPeers, setDiscoveredPeers] = useState<LanPeerCandidate[]>([]);
+  const [manualLanAddress, setManualLanAddress] = useState("");
+  const [manualLanPort, setManualLanPort] = useState(
+    localSync.lan_sync_port ? String(localSync.lan_sync_port) : "38256",
+  );
 
   const recentBackups = useMemo(() => backups.slice(0, 10), [backups]);
-  const currentMonth = currentMonthKey();
-  const planningWindowEnd = shiftMonthKey(currentMonth, settings.school_year_months - 1);
-  const formPlanningWindowEnd = shiftMonthKey(currentMonth, schoolYearMonths - 1);
+  const planningWindowStart = settings.planning_start_month_key;
+  const planningWindowEnd = shiftMonthKey(planningWindowStart, settings.school_year_months - 1);
+  const formPlanningWindowEnd = isMonthKey(planningStartMonthKey)
+    ? shiftMonthKey(planningStartMonthKey, schoolYearMonths - 1)
+    : planningStartMonthKey;
   const settingsChanged =
+    planningStartMonthKey !== settings.planning_start_month_key ||
     schoolYearMonths !== settings.school_year_months ||
     backupRetention !== settings.backup_retention;
+  const deviceNameChanged = deviceName.trim() !== localSync.device_name;
   const settingsValid =
+    isMonthKey(planningStartMonthKey) &&
     schoolYearMonths >= 1 &&
     schoolYearMonths <= 12 &&
     backupRetention >= 1 &&
     backupRetention <= 200;
 
   useEffect(() => {
+    setPlanningStartMonthKey(settings.planning_start_month_key);
     setSchoolYearMonths(settings.school_year_months);
     setBackupRetention(settings.backup_retention);
-  }, [settings.backup_retention, settings.school_year_months]);
+  }, [
+    settings.backup_retention,
+    settings.planning_start_month_key,
+    settings.school_year_months,
+  ]);
+
+  useEffect(() => {
+    setDeviceName(localSync.device_name);
+  }, [localSync.device_name]);
+
+  useEffect(() => {
+    if (localSync.lan_sync_port) {
+      setManualLanPort(String(localSync.lan_sync_port));
+    }
+  }, [localSync.lan_sync_port]);
 
   const runAction = async (
     actionKey: string,
@@ -96,6 +150,132 @@ export function SettingsPage({
     const selectedPath = await chooseJsonImportPath(importPath);
     if (selectedPath) {
       setImportPath(selectedPath);
+    }
+  };
+
+  const handleChooseSyncExportPath = async () => {
+    const selectedPath = await chooseSyncPacketExportPath(syncExportPath);
+    if (selectedPath) {
+      setSyncExportPath(selectedPath);
+    }
+  };
+
+  const handleChooseSyncImportPath = async () => {
+    const selectedPath = await chooseSyncPacketImportPath(syncImportPath);
+    if (selectedPath) {
+      setSyncImportPath(selectedPath);
+    }
+  };
+
+  const handleExportSyncPacket = async () => {
+    setBusyAction("sync-export");
+    try {
+      const result = await exportSyncPacket(syncExportPath.trim());
+      setNotice({
+        kind: "success",
+        text: `Exported ${result.operation_count} sync operations to ${result.path}.`,
+      });
+    } catch (error) {
+      setNotice({ kind: "error", text: String(error) });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleImportSyncPacket = async () => {
+    setBusyAction("sync-import");
+    try {
+      const result = await importSyncPacket(syncImportPath.trim());
+      setNotice({
+        kind: "success",
+        text: `Imported ${result.imported_operations} sync operations from ${result.source_device_name}.`,
+      });
+      await onRefresh();
+    } catch (error) {
+      setNotice({ kind: "error", text: String(error) });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleExportForLocalSend = async () => {
+    setBusyAction("localsend");
+    try {
+      const result = await exportSyncPacketForLocalSend();
+      setNotice({
+        kind: "success",
+        text: `Exported ${result.operation_count} sync operations, opened LocalSend, and revealed ${result.path}.`,
+      });
+      await onRefresh();
+    } catch (error) {
+      setNotice({ kind: "error", text: String(error) });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleOpenSyncInbox = async () => {
+    setBusyAction("sync-inbox-open");
+    try {
+      const openedPath = await openSyncInboxFolder();
+      setNotice({
+        kind: "success",
+        text: `Opened sync inbox at ${openedPath}.`,
+      });
+    } catch (error) {
+      setNotice({ kind: "error", text: String(error) });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleProcessSyncInbox = async () => {
+    setBusyAction("sync-inbox-process");
+    try {
+      const result = await processSyncInbox();
+      setNotice({
+        kind: "success",
+        text: `Scanned ${result.scanned_files} inbox files, processed ${result.processed_files}, failed ${result.failed_files}.`,
+      });
+      await onRefresh();
+    } catch (error) {
+      setNotice({ kind: "error", text: String(error) });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleDiscoverLanPeers = async () => {
+    setBusyAction("lan-discover");
+    try {
+      const peers = await discoverLanPeers();
+      setDiscoveredPeers(peers);
+      setNotice({
+        kind: "success",
+        text: peers.length
+          ? `Found ${peers.length} device(s) on the local network.`
+          : "No student budget tracker devices responded on the local network.",
+      });
+    } catch (error) {
+      setNotice({ kind: "error", text: String(error) });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleLanSync = async (address: string, port: number) => {
+    setBusyAction("lan-sync");
+    try {
+      const result = await syncWithLanPeer({ address, port });
+      setNotice({
+        kind: "success",
+        text: `Synced ${result.sent_operations} queued operations to ${result.peer_device_name}. Peer imported ${result.peer_imported_operations} new operations.`,
+      });
+      await onRefresh();
+    } catch (error) {
+      setNotice({ kind: "error", text: String(error) });
+    } finally {
+      setBusyAction(null);
     }
   };
 
@@ -156,7 +336,7 @@ export function SettingsPage({
       <div className={styles.grid3}>
         <MetricCard
           eyebrow="Planning"
-          note={`${monthLabel(currentMonth)} to ${monthLabel(planningWindowEnd)}.`}
+          note={`${monthLabel(planningWindowStart)} to ${monthLabel(planningWindowEnd)}.`}
           title="Planning window"
           value={`${settings.school_year_months} months`}
         />
@@ -177,6 +357,16 @@ export function SettingsPage({
       <div className={styles.grid2}>
         <SectionCard eyebrow="Planning controls" title="Planning and backup settings">
           <div className={styles.stack}>
+            <label className={styles.field}>
+              <span>Planning window start</span>
+              <input
+                className={styles.input}
+                onChange={(event) => setPlanningStartMonthKey(event.target.value)}
+                type="month"
+                value={planningStartMonthKey}
+              />
+            </label>
+
             <label className={styles.field}>
               <span>Planning window in months</span>
               <input
@@ -204,11 +394,19 @@ export function SettingsPage({
             <div className={styles.summaryList}>
               <div className={styles.summaryRow}>
                 <span>Window starts</span>
-                <span className={styles.inlineValue}>{monthLabel(currentMonth)}</span>
+                <span className={styles.inlineValue}>
+                  {isMonthKey(planningStartMonthKey)
+                    ? monthLabel(planningStartMonthKey)
+                    : planningStartMonthKey || "Invalid"}
+                </span>
               </div>
               <div className={styles.summaryRow}>
                 <span>Window ends</span>
-                <span className={styles.inlineValue}>{monthLabel(formPlanningWindowEnd)}</span>
+                <span className={styles.inlineValue}>
+                  {isMonthKey(formPlanningWindowEnd)
+                    ? monthLabel(formPlanningWindowEnd)
+                    : formPlanningWindowEnd || "Invalid"}
+                </span>
               </div>
               <div className={styles.summaryRow}>
                 <span>Language</span>
@@ -221,8 +419,9 @@ export function SettingsPage({
             </div>
 
             <div className={styles.helperText}>
-              Forward totals and charts use recurring rules plus this planning window. If rent
-              continues through summer, extend the recurring rent rule to the contract end date.
+              Charts keep the months from the selected start, while balance projections switch from
+              historical months to current and future months automatically. If rent continues
+              through summer, extend the recurring rent rule to the contract end date.
             </div>
 
             <div className={styles.rowActions}>
@@ -234,7 +433,7 @@ export function SettingsPage({
                     "settings",
                     () =>
                       updateAppSettings({
-                        school_year_start_month: settings.school_year_start_month,
+                        planning_start_month_key: planningStartMonthKey,
                         school_year_months: schoolYearMonths,
                         backup_retention: backupRetention,
                       }),
@@ -249,6 +448,7 @@ export function SettingsPage({
                 className={styles.secondaryButton}
                 disabled={!settingsChanged || busyAction === "settings"}
                 onClick={() => {
+                  setPlanningStartMonthKey(settings.planning_start_month_key);
                   setSchoolYearMonths(settings.school_year_months);
                   setBackupRetention(settings.backup_retention);
                 }}
@@ -296,6 +496,334 @@ export function SettingsPage({
             >
               Run legacy migration
             </button>
+          </div>
+        </SectionCard>
+      </div>
+
+      <div className={styles.grid2}>
+        <SectionCard eyebrow="Local sync" title="Device and packet exchange">
+          <div className={styles.stack}>
+            <label className={styles.field}>
+              <span>Device name</span>
+              <input
+                className={styles.input}
+                onChange={(event) => setDeviceName(event.target.value)}
+                value={deviceName}
+              />
+            </label>
+
+            <div className={styles.summaryList}>
+              <div className={styles.summaryRow}>
+                <span>Device ID</span>
+                <span className={styles.inlineValue}>{localSync.device_id}</span>
+              </div>
+              <div className={styles.summaryRow}>
+                <span>Queued local operations</span>
+                <span className={styles.inlineValue}>{localSync.pending_operations}</span>
+              </div>
+              <div className={styles.summaryRow}>
+                <span>Inbox packets</span>
+                <span className={styles.inlineValue}>{localSync.inbox_packet_count}</span>
+              </div>
+              <div className={styles.summaryRow}>
+                <span>Trusted devices</span>
+                <span className={styles.inlineValue}>{localSync.trusted_peers.length}</span>
+              </div>
+              <div className={styles.summaryRow}>
+                <span>Last sync</span>
+                <span className={styles.inlineValue}>
+                  {localSync.last_sync_at_utc ?? "Not synced yet"}
+                </span>
+              </div>
+              <div className={styles.summaryRow}>
+                <span>Transport mode</span>
+                <span className={styles.inlineValue}>{localSync.transport_mode}</span>
+              </div>
+              <div className={styles.summaryRow}>
+                <span>LocalSend</span>
+                <span className={styles.inlineValue}>
+                  {localSync.localsend_available ? "Detected" : "Not found"}
+                </span>
+              </div>
+              <div className={styles.summaryRow}>
+                <span>Inbox watcher</span>
+                <span className={styles.inlineValue}>
+                  {localSync.inbox_watch_active ? "Active" : "Inactive"}
+                </span>
+              </div>
+              <div className={styles.summaryRow}>
+                <span>Direct LAN sync</span>
+                <span className={styles.inlineValue}>
+                  {localSync.lan_direct_available
+                    ? `Ready on port ${localSync.lan_sync_port ?? "?"}`
+                    : "Unavailable"}
+                </span>
+              </div>
+            </div>
+
+            <div className={styles.helperText}>
+              Export a sync packet, move it with LocalSend, a shared folder, Bluetooth, or USB,
+              then import it on the other device. The app records trusted devices and skips
+              duplicate operations automatically.
+            </div>
+
+            <div className={styles.helperText}>
+              Drop received sync packets into the inbox folder. The app scans that folder on
+              startup and while it stays open, and `Scan inbox now` is available if you want to
+              force it immediately. Successful imports are archived and failed files go to a
+              separate failure folder.
+            </div>
+
+            <div className={styles.helperText}>
+              Direct LAN sync uses local network discovery plus a built-in listener. If discovery
+              misses a device, use the manual address fields below.
+            </div>
+
+            {localSync.localsend_path ? (
+              <div className={styles.helperText}>LocalSend path: {localSync.localsend_path}</div>
+            ) : null}
+
+            <div className={styles.helperText}>Sync inbox: {localSync.sync_inbox_path}</div>
+            <div className={styles.helperText}>Sync archive: {localSync.sync_archive_path}</div>
+            <div className={styles.helperText}>Sync failed: {localSync.sync_failed_path}</div>
+
+            <div className={styles.helperText}>
+              LocalSend is launch-assisted here: the app exports the packet, opens LocalSend, and
+              reveals the file in Explorer so you can send it to the selected device.
+            </div>
+
+            {localSync.last_error ? (
+              <div className={styles.helperText}>Last sync error: {localSync.last_error}</div>
+            ) : null}
+
+            <div className={styles.rowActions}>
+              <button
+                className={styles.primaryButton}
+                disabled={!localSync.localsend_available || busyAction === "localsend"}
+                onClick={() => void handleExportForLocalSend()}
+                type="button"
+              >
+                Export and open LocalSend
+              </button>
+              <button
+                className={styles.primaryButton}
+                disabled={!deviceName.trim() || !deviceNameChanged || busyAction === "device"}
+                onClick={() =>
+                  void runAction(
+                    "device",
+                    () =>
+                      updateLocalSyncDeviceName({
+                        device_name: deviceName.trim(),
+                      }),
+                    "Device name updated.",
+                  )
+                }
+                type="button"
+              >
+                Save device name
+              </button>
+              <button
+                className={styles.secondaryButton}
+                disabled={busyAction === "sync-inbox-process"}
+                onClick={() => void handleProcessSyncInbox()}
+                type="button"
+              >
+                Scan inbox now
+              </button>
+              <button
+                className={styles.secondaryButton}
+                disabled={busyAction === "sync-inbox-open"}
+                onClick={() => void handleOpenSyncInbox()}
+                type="button"
+              >
+                Open sync inbox
+              </button>
+              <button
+                className={styles.secondaryButton}
+                disabled={!deviceNameChanged || busyAction === "device"}
+                onClick={() => setDeviceName(localSync.device_name)}
+                type="button"
+              >
+                Reset device name
+              </button>
+              <button
+                className={styles.secondaryButton}
+                disabled={!localSync.lan_direct_available || busyAction === "lan-discover"}
+                onClick={() => void handleDiscoverLanPeers()}
+                type="button"
+              >
+                Scan network
+              </button>
+            </div>
+
+            <div className={styles.tableWrap}>
+              <table className={styles.table}>
+                <thead>
+                  <tr>
+                    <th>Trusted device</th>
+                    <th>Paired</th>
+                    <th>Last seen</th>
+                    <th>Last sync</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {localSync.trusted_peers.length ? (
+                    localSync.trusted_peers.map((peer) => (
+                      <tr key={peer.peer_device_id}>
+                        <td>{peer.device_name}</td>
+                        <td>{peer.paired_at_utc}</td>
+                        <td>{peer.last_seen_at_utc ?? "Never"}</td>
+                        <td>{peer.last_sync_at_utc ?? "Never"}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td className={styles.emptyState} colSpan={4}>
+                        No trusted devices yet.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className={styles.pathPicker}>
+              <input
+                aria-label="Export sync packet path"
+                className={styles.input}
+                onChange={(event) => setSyncExportPath(event.target.value)}
+                placeholder="C:\\Path\\To\\student-budget-sync.json"
+                value={syncExportPath}
+              />
+              <button
+                className={styles.secondaryButton}
+                disabled={busyAction === "sync-export"}
+                onClick={() => void handleChooseSyncExportPath()}
+                type="button"
+              >
+                Choose packet export location
+              </button>
+            </div>
+
+            <div className={styles.rowActions}>
+              <button
+                className={styles.primaryButton}
+                disabled={!syncExportPath.trim() || busyAction === "sync-export"}
+                onClick={() => void handleExportSyncPacket()}
+                type="button"
+              >
+                Export sync packet
+              </button>
+            </div>
+
+            <div className={styles.pathPicker}>
+              <input
+                aria-label="Import sync packet path"
+                className={styles.input}
+                onChange={(event) => setSyncImportPath(event.target.value)}
+                placeholder="C:\\Path\\To\\student-budget-sync.json"
+                value={syncImportPath}
+              />
+              <button
+                className={styles.secondaryButton}
+                disabled={busyAction === "sync-import"}
+                onClick={() => void handleChooseSyncImportPath()}
+                type="button"
+              >
+                Choose sync packet file
+              </button>
+            </div>
+
+            <div className={styles.rowActions}>
+              <button
+                className={styles.secondaryButton}
+                disabled={!syncImportPath.trim() || busyAction === "sync-import"}
+                onClick={() => void handleImportSyncPacket()}
+                type="button"
+              >
+                Import sync packet
+              </button>
+            </div>
+
+            <div className={styles.tableWrap}>
+              <table className={styles.table}>
+                <thead>
+                  <tr>
+                    <th>LAN device</th>
+                    <th>Address</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {discoveredPeers.length ? (
+                    discoveredPeers.map((peer) => (
+                      <tr key={`${peer.device_id}-${peer.address}-${peer.port}`}>
+                        <td>{peer.device_name}</td>
+                        <td>
+                          {peer.address}:{peer.port}
+                        </td>
+                        <td>
+                          {peer.trusted
+                            ? `Trusted${peer.last_sync_at_utc ? `, last sync ${peer.last_sync_at_utc}` : ""}`
+                            : "New device"}
+                        </td>
+                        <td>
+                          <button
+                            className={styles.secondaryButton}
+                            disabled={busyAction === "lan-sync"}
+                            onClick={() => void handleLanSync(peer.address, peer.port)}
+                            type="button"
+                          >
+                            Sync now
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td className={styles.emptyState} colSpan={4}>
+                        Scan the local network to find other student budget tracker devices.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className={styles.pathPicker}>
+              <input
+                aria-label="Manual LAN address"
+                className={styles.input}
+                onChange={(event) => setManualLanAddress(event.target.value)}
+                placeholder="192.168.1.24"
+                value={manualLanAddress}
+              />
+              <input
+                aria-label="Manual LAN port"
+                className={styles.input}
+                onChange={(event) => setManualLanPort(event.target.value)}
+                placeholder="38256"
+                type="number"
+                value={manualLanPort}
+              />
+            </div>
+
+            <div className={styles.rowActions}>
+              <button
+                className={styles.secondaryButton}
+                disabled={
+                  !manualLanAddress.trim() ||
+                  !manualLanPort.trim() ||
+                  Number(manualLanPort) <= 0 ||
+                  busyAction === "lan-sync"
+                }
+                onClick={() => void handleLanSync(manualLanAddress.trim(), Number(manualLanPort))}
+                type="button"
+              >
+                Sync to address
+              </button>
+            </div>
           </div>
         </SectionCard>
       </div>

@@ -90,6 +90,8 @@ pub struct MonthlyCap {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub school_year_start_month: u32,
+    #[serde(default)]
+    pub planning_start_month_key: String,
     pub school_year_months: u32,
     pub language: String,
     pub backup_retention: u32,
@@ -174,6 +176,123 @@ pub struct MigrationStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncPeerSummary {
+    pub peer_device_id: String,
+    pub device_name: String,
+    pub paired_at_utc: String,
+    pub last_seen_at_utc: Option<String>,
+    pub last_sync_at_utc: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalSyncState {
+    pub device_id: String,
+    pub device_name: String,
+    pub pending_operations: u32,
+    pub inbox_packet_count: u32,
+    pub trusted_peers: Vec<SyncPeerSummary>,
+    pub last_sync_at_utc: Option<String>,
+    pub last_error: Option<String>,
+    pub transport_mode: String,
+    pub localsend_available: bool,
+    pub localsend_path: Option<String>,
+    pub inbox_watch_active: bool,
+    pub lan_direct_available: bool,
+    pub lan_sync_port: Option<u16>,
+    pub sync_inbox_path: String,
+    pub sync_archive_path: String,
+    pub sync_failed_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncDeviceIdentity {
+    pub device_id: String,
+    pub device_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncOperationRecord {
+    pub op_seq: i64,
+    pub device_id: String,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub operation_type: String,
+    pub payload_json: serde_json::Value,
+    pub created_at_utc: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncPacket {
+    pub app: String,
+    pub schema_version: u32,
+    pub generated_at_utc: String,
+    pub source: SyncDeviceIdentity,
+    pub operations: Vec<SyncOperationRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncPacketExportResult {
+    pub path: String,
+    pub operation_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncPacketImportResult {
+    pub source_device_id: String,
+    pub source_device_name: String,
+    pub imported_operations: u32,
+    pub skipped_operations: u32,
+    pub trusted_peer_added: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncPacketLaunchResult {
+    pub path: String,
+    pub operation_count: u32,
+    pub localsend_path: String,
+    pub explorer_revealed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncInboxProcessResult {
+    pub inbox_path: String,
+    pub archive_path: String,
+    pub failed_path: String,
+    pub scanned_files: u32,
+    pub processed_files: u32,
+    pub failed_files: u32,
+    pub imported_operations: u32,
+    pub skipped_operations: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanPeerCandidate {
+    pub device_id: String,
+    pub device_name: String,
+    pub address: String,
+    pub port: u16,
+    pub trusted: bool,
+    pub last_sync_at_utc: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanSyncSendInput {
+    pub address: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanSyncSendResult {
+    pub peer_device_id: String,
+    pub peer_device_name: String,
+    pub address: String,
+    pub port: u16,
+    pub sent_operations: u32,
+    pub peer_imported_operations: u32,
+    pub peer_skipped_operations: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootstrapState {
     pub accounts: Vec<Account>,
     pub entries: Vec<LedgerEntry>,
@@ -183,6 +302,7 @@ pub struct BootstrapState {
     pub insight_snapshot: InsightSnapshot,
     pub backup_files: Vec<BackupFile>,
     pub migration_status: MigrationStatus,
+    pub local_sync: LocalSyncState,
     pub recovery_notice: Option<String>,
 }
 
@@ -280,7 +400,12 @@ pub struct MonthlyCapInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSettingsInput {
-    pub school_year_start_month: u32,
+    pub planning_start_month_key: String,
     pub school_year_months: u32,
     pub backup_retention: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateLocalSyncDeviceNameInput {
+    pub device_name: String,
 }

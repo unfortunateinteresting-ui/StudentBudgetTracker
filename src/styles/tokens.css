@@ -36,9 +36,15 @@
   --color-sidebar-bg: linear-gradient(180deg, rgba(38, 54, 43, 0.95), rgba(29, 38, 33, 1));
   --color-sidebar-panel-border: rgba(255, 248, 240, 0.12);
   --color-sidebar-panel-bg: rgba(255, 248, 240, 0.04);
+  --color-sidebar-text: rgba(255, 248, 240, 0.92);
   --color-sidebar-muted: rgba(255, 248, 240, 0.75);
   --color-sidebar-button-bg: rgba(255, 248, 240, 0.05);
   --color-sidebar-button-hover: rgba(255, 248, 240, 0.08);
+  --color-sidebar-active-bg: linear-gradient(
+    135deg,
+    rgba(216, 146, 109, 0.9),
+    rgba(115, 151, 101, 0.9)
+  );
   --color-sidebar-footer-border: rgba(255, 248, 240, 0.12);
   --color-sidebar-footer-text: rgba(255, 248, 240, 0.72);
   --color-sidebar-active-text: #1b1d16;
@@ -84,12 +90,18 @@
   --color-sidebar-bg: linear-gradient(180deg, rgba(12, 17, 16, 0.97), rgba(8, 11, 10, 1));
   --color-sidebar-panel-border: rgba(237, 244, 236, 0.1);
   --color-sidebar-panel-bg: rgba(237, 244, 236, 0.03);
+  --color-sidebar-text: rgba(237, 244, 236, 0.94);
   --color-sidebar-muted: rgba(237, 244, 236, 0.68);
   --color-sidebar-button-bg: rgba(237, 244, 236, 0.05);
   --color-sidebar-button-hover: rgba(237, 244, 236, 0.09);
+  --color-sidebar-active-bg: linear-gradient(
+    135deg,
+    rgba(225, 162, 125, 0.42),
+    rgba(143, 184, 135, 0.4)
+  );
   --color-sidebar-footer-border: rgba(237, 244, 236, 0.12);
   --color-sidebar-footer-text: rgba(237, 244, 236, 0.68);
-  --color-sidebar-active-text: #10130f;
+  --color-sidebar-active-text: rgba(237, 244, 236, 0.98);
   --color-badge-manual: #f0c36a;
   --color-badge-manual-bg: rgba(240, 195, 106, 0.14);
   --color-badge-paused-bg: rgba(237, 244, 236, 0.08);
