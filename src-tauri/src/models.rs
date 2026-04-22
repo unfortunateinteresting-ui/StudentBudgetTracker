@@ -188,6 +188,7 @@ pub struct SyncPeerSummary {
 pub struct LocalSyncState {
     pub device_id: String,
     pub device_name: String,
+    pub local_ipv4_addresses: Vec<String>,
     pub pending_operations: u32,
     pub inbox_packet_count: u32,
     pub trusted_peers: Vec<SyncPeerSummary>,

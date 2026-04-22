@@ -97,6 +97,7 @@ const bootstrapFixture = {
   local_sync: {
     device_id: "device-1",
     device_name: "Dorm laptop",
+    local_ipv4_addresses: ["192.168.1.250"],
     pending_operations: 0,
     inbox_packet_count: 0,
     trusted_peers: [],

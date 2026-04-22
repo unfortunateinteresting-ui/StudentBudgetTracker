@@ -51,6 +51,7 @@ const migrationStatus = {
 const localSync = {
   device_id: "device-1",
   device_name: "Dorm laptop",
+  local_ipv4_addresses: ["192.168.1.250"],
   pending_operations: 3,
   inbox_packet_count: 2,
   trusted_peers: [],

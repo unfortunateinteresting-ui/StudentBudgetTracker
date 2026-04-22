@@ -153,6 +153,7 @@ export interface SyncPeerSummary {
 export interface LocalSyncState {
   device_id: string;
   device_name: string;
+  local_ipv4_addresses: string[];
   pending_operations: number;
   inbox_packet_count: number;
   trusted_peers: SyncPeerSummary[];

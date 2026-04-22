@@ -1,10 +1,10 @@
 mod models;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fs,
     io::{Read, Write},
-    net::{Shutdown, TcpListener, TcpStream, UdpSocket},
+    net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket},
     path::{Path, PathBuf},
     process::Command,
     sync::{mpsc, Mutex},
@@ -14,6 +14,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{Datelike, Duration, Local, NaiveDate};
+use if_addrs::{get_if_addrs, IfAddr};
 use models::*;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -336,6 +337,44 @@ fn emit_sync_attention(app_handle: &AppHandle, message: &str) {
             "at": now_local_iso(),
         }),
     );
+}
+
+fn is_candidate_sync_ipv4(ip: Ipv4Addr) -> bool {
+    !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified()
+}
+
+fn broadcast_address_for_ipv4(ip: Ipv4Addr, netmask: Ipv4Addr) -> Ipv4Addr {
+    Ipv4Addr::from(u32::from(ip) | !u32::from(netmask))
+}
+
+fn collect_sync_network_targets() -> (Vec<String>, Vec<SocketAddr>) {
+    let mut local_ipv4_addresses = BTreeSet::new();
+    let mut discovery_broadcast_addresses = BTreeSet::new();
+    discovery_broadcast_addresses.insert(Ipv4Addr::new(255, 255, 255, 255));
+
+    if let Ok(interfaces) = get_if_addrs() {
+        for interface in interfaces {
+            let IfAddr::V4(v4) = interface.addr else {
+                continue;
+            };
+            if !is_candidate_sync_ipv4(v4.ip) {
+                continue;
+            }
+            local_ipv4_addresses.insert(v4.ip);
+            discovery_broadcast_addresses.insert(broadcast_address_for_ipv4(v4.ip, v4.netmask));
+        }
+    }
+
+    (
+        local_ipv4_addresses
+            .into_iter()
+            .map(|ip| ip.to_string())
+            .collect(),
+        discovery_broadcast_addresses
+            .into_iter()
+            .map(|ip| SocketAddr::from((ip, SYNC_DISCOVERY_PORT)))
+            .collect(),
+    )
 }
 
 pub fn run() {
@@ -1578,6 +1617,7 @@ fn fetch_sync_peer_summaries(conn: &Connection) -> AppResult<Vec<SyncPeerSummary
 fn fetch_local_sync_state(conn: &Connection, state: &AppState) -> AppResult<LocalSyncState> {
     ensure_sync_device_row(conn)?;
     let env = &state.env;
+    let (local_ipv4_addresses, _) = collect_sync_network_targets();
     let localsend_path = find_localsend_executable().map(|path| path.to_string_lossy().to_string());
     let inbox_packet_count = list_sync_packet_files(&sync_inbox_dir(&env))?.len() as u32;
     let (inbox_watch_active, lan_direct_available, lan_sync_port) =
@@ -1624,6 +1664,7 @@ fn fetch_local_sync_state(conn: &Connection, state: &AppState) -> AppResult<Loca
     Ok(LocalSyncState {
         device_id,
         device_name,
+        local_ipv4_addresses,
         pending_operations,
         inbox_packet_count,
         trusted_peers,
@@ -3827,10 +3868,22 @@ fn discover_lan_peers_internal(state: &AppState) -> AppResult<Vec<LanPeerCandida
         source: local_identity.clone(),
     };
 
-    socket.send_to(
-        &serde_json::to_vec(&request)?,
-        ("255.255.255.255", SYNC_DISCOVERY_PORT),
-    )?;
+    let (_, discovery_targets) = collect_sync_network_targets();
+    let payload = serde_json::to_vec(&request)?;
+    let mut successful_sends = 0;
+    let mut last_send_error = None;
+    for target in discovery_targets {
+        match socket.send_to(&payload, target) {
+            Ok(_) => successful_sends += 1,
+            Err(err) => last_send_error = Some(err),
+        }
+    }
+    if successful_sends == 0 {
+        if let Some(err) = last_send_error {
+            return Err(err.into());
+        }
+        return Err(anyhow!("No LAN discovery targets were available."));
+    }
 
     let start = std::time::Instant::now();
     let mut buffer = [0u8; 4096];

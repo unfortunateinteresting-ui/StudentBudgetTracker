@@ -518,6 +518,14 @@ export function SettingsPage({
                 <span className={styles.inlineValue}>{localSync.device_id}</span>
               </div>
               <div className={styles.summaryRow}>
+                <span>Local IPv4</span>
+                <span className={styles.inlineValue}>
+                  {localSync.local_ipv4_addresses.length
+                    ? localSync.local_ipv4_addresses.join(", ")
+                    : "Not detected"}
+                </span>
+              </div>
+              <div className={styles.summaryRow}>
                 <span>Queued local operations</span>
                 <span className={styles.inlineValue}>{localSync.pending_operations}</span>
               </div>
@@ -577,6 +585,14 @@ export function SettingsPage({
             <div className={styles.helperText}>
               Direct LAN sync uses local network discovery plus a built-in listener. If discovery
               misses a device, use the manual address fields below.
+            </div>
+
+            <div className={styles.helperText}>
+              For manual sync, enter the other computer's Wi-Fi IPv4 address. This device currently
+              reports:{" "}
+              {localSync.local_ipv4_addresses.length
+                ? localSync.local_ipv4_addresses.join(", ")
+                : "no local IPv4 addresses detected"}.
             </div>
 
             {localSync.localsend_path ? (
