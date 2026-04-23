@@ -7,10 +7,13 @@ use std::{
     net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket},
     path::{Path, PathBuf},
     process::Command,
-    sync::{mpsc, Mutex},
+    sync::{mpsc, Mutex, OnceLock},
     thread,
     time::Duration as StdDuration,
 };
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{Datelike, Duration, Local, NaiveDate};
@@ -36,6 +39,10 @@ const SYNC_DISCOVERY_PORT: u16 = 38255;
 const SYNC_LAN_PORT: u16 = 38256;
 const SYNC_EVENT_UPDATED: &str = "sync-updated";
 const SYNC_EVENT_ATTENTION: &str = "sync-attention";
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+static LOCALSEND_EXECUTABLE: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 const INIT_SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS app_meta (
@@ -339,6 +346,13 @@ fn emit_sync_attention(app_handle: &AppHandle, message: &str) {
     );
 }
 
+fn hide_child_console(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 fn is_candidate_sync_ipv4(ip: Ipv4Addr) -> bool {
     !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified()
 }
@@ -347,10 +361,37 @@ fn broadcast_address_for_ipv4(ip: Ipv4Addr, netmask: Ipv4Addr) -> Ipv4Addr {
     Ipv4Addr::from(u32::from(ip) | !u32::from(netmask))
 }
 
+fn add_unicast_discovery_targets(
+    targets: &mut BTreeSet<Ipv4Addr>,
+    ip: Ipv4Addr,
+    netmask: Ipv4Addr,
+) {
+    let ip_u32 = u32::from(ip);
+    let mask_u32 = u32::from(netmask);
+    let host_bits = (!mask_u32).count_ones();
+
+    let (network, broadcast) = if host_bits <= 8 {
+        let network = ip_u32 & mask_u32;
+        (network, network | !mask_u32)
+    } else {
+        // Large campus/home subnets are too broad to scan. A /24 around the local
+        // address catches the common case where broadcast is filtered one way.
+        let network = ip_u32 & 0xFF_FF_FF_00;
+        (network, network | 0xFF)
+    };
+
+    for candidate in network.saturating_add(1)..broadcast {
+        if candidate == ip_u32 {
+            continue;
+        }
+        targets.insert(Ipv4Addr::from(candidate));
+    }
+}
+
 fn collect_sync_network_targets() -> (Vec<String>, Vec<SocketAddr>) {
     let mut local_ipv4_addresses = BTreeSet::new();
-    let mut discovery_broadcast_addresses = BTreeSet::new();
-    discovery_broadcast_addresses.insert(Ipv4Addr::new(255, 255, 255, 255));
+    let mut discovery_target_addresses = BTreeSet::new();
+    discovery_target_addresses.insert(Ipv4Addr::new(255, 255, 255, 255));
 
     if let Ok(interfaces) = get_if_addrs() {
         for interface in interfaces {
@@ -361,7 +402,8 @@ fn collect_sync_network_targets() -> (Vec<String>, Vec<SocketAddr>) {
                 continue;
             }
             local_ipv4_addresses.insert(v4.ip);
-            discovery_broadcast_addresses.insert(broadcast_address_for_ipv4(v4.ip, v4.netmask));
+            discovery_target_addresses.insert(broadcast_address_for_ipv4(v4.ip, v4.netmask));
+            add_unicast_discovery_targets(&mut discovery_target_addresses, v4.ip, v4.netmask);
         }
     }
 
@@ -370,7 +412,7 @@ fn collect_sync_network_targets() -> (Vec<String>, Vec<SocketAddr>) {
             .into_iter()
             .map(|ip| ip.to_string())
             .collect(),
-        discovery_broadcast_addresses
+        discovery_target_addresses
             .into_iter()
             .map(|ip| SocketAddr::from((ip, SYNC_DISCOVERY_PORT)))
             .collect(),
@@ -616,6 +658,12 @@ fn move_sync_packet_file(source: &Path, target_dir: &Path) -> AppResult<PathBuf>
 }
 
 fn find_localsend_executable() -> Option<PathBuf> {
+    LOCALSEND_EXECUTABLE
+        .get_or_init(find_localsend_executable_uncached)
+        .clone()
+}
+
+fn find_localsend_executable_uncached() -> Option<PathBuf> {
     if let Some(override_path) = std::env::var("STUDENT_BUDGET_TRACKER_LOCALSEND_PATH")
         .ok()
         .map(PathBuf::from)
@@ -630,7 +678,10 @@ fn find_localsend_executable() -> Option<PathBuf> {
         "localsend_app",
         "localsend",
     ] {
-        if let Ok(output) = Command::new("where.exe").arg(candidate).output() {
+        let mut command = Command::new("where.exe");
+        command.arg(candidate);
+        hide_child_console(&mut command);
+        if let Ok(output) = command.output() {
             if output.status.success() {
                 if let Some(path) = String::from_utf8_lossy(&output.stdout)
                     .lines()
@@ -670,7 +721,9 @@ fn find_localsend_executable() -> Option<PathBuf> {
 }
 
 fn launch_localsend(localsend_path: &Path) -> AppResult<()> {
-    Command::new(localsend_path).spawn().with_context(|| {
+    let mut command = Command::new(localsend_path);
+    hide_child_console(&mut command);
+    command.spawn().with_context(|| {
         format!(
             "Failed to launch LocalSend from {}.",
             localsend_path.display()
@@ -680,16 +733,20 @@ fn launch_localsend(localsend_path: &Path) -> AppResult<()> {
 }
 
 fn reveal_file_in_explorer(path: &Path) -> AppResult<()> {
-    Command::new("explorer.exe")
-        .arg(format!("/select,{}", path.display()))
+    let mut command = Command::new("explorer.exe");
+    command.arg(format!("/select,{}", path.display()));
+    hide_child_console(&mut command);
+    command
         .spawn()
         .with_context(|| format!("Failed to open Explorer for {}.", path.display()))?;
     Ok(())
 }
 
 fn open_directory_in_explorer(path: &Path) -> AppResult<()> {
-    Command::new("explorer.exe")
-        .arg(path)
+    let mut command = Command::new("explorer.exe");
+    command.arg(path);
+    hide_child_console(&mut command);
+    command
         .spawn()
         .with_context(|| format!("Failed to open Explorer for {}.", path.display()))?;
     Ok(())
@@ -3650,6 +3707,9 @@ fn build_sync_packet(conn: &Connection) -> AppResult<SyncPacket> {
         schema_version: SYNC_PACKET_SCHEMA_VERSION,
         generated_at_utc: now_local_iso(),
         source: fetch_sync_device_identity(conn)?,
+        dependencies: SyncPacketDependencies {
+            accounts: fetch_accounts(conn)?,
+        },
         operations: fetch_sync_operations(conn)?,
     })
 }
@@ -3755,12 +3815,34 @@ fn import_sync_packet_value_internal(
         let mut imported_operations = 0u32;
         let mut skipped_operations = 0u32;
         let mut max_received_seq = last_received_seq;
+        let new_operations = packet
+            .operations
+            .iter()
+            .filter(|operation| {
+                if operation.op_seq <= last_received_seq {
+                    skipped_operations += 1;
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect::<Vec<_>>();
 
-        for operation in &packet.operations {
-            if operation.op_seq <= last_received_seq {
-                skipped_operations += 1;
-                continue;
-            }
+        for account in &packet.dependencies.accounts {
+            insert_account_raw(&tx, account)?;
+        }
+
+        for operation in new_operations.iter().filter(|operation| {
+            operation.entity_type == "account" && operation.operation_type == "upsert"
+        }) {
+            apply_sync_operation(&tx, operation)?;
+            imported_operations += 1;
+            max_received_seq = max_received_seq.max(operation.op_seq);
+        }
+
+        for operation in new_operations.iter().filter(|operation| {
+            !(operation.entity_type == "account" && operation.operation_type == "upsert")
+        }) {
             apply_sync_operation(&tx, operation)?;
             imported_operations += 1;
             max_received_seq = max_received_seq.max(operation.op_seq);
@@ -5233,6 +5315,8 @@ mod tests {
         assert_eq!(result.operation_count, 1);
         assert_eq!(packet.app, SYNC_PACKET_APP_NAME);
         assert_eq!(packet.schema_version, SYNC_PACKET_SCHEMA_VERSION);
+        assert_eq!(packet.dependencies.accounts.len(), 1);
+        assert_eq!(packet.dependencies.accounts[0].id, "sync-account");
         assert_eq!(packet.operations.len(), 1);
         assert_eq!(packet.operations[0].entity_type, "account");
         assert_eq!(packet.operations[0].entity_id, "sync-account");
@@ -5309,6 +5393,60 @@ mod tests {
         assert_eq!(second.imported_operations, 0);
         assert_eq!(second.skipped_operations, 2);
         assert_eq!(entries_after_second.len(), entry_count_after_first_import);
+
+        let _ = fs::remove_dir_all(source_dir);
+        let _ = fs::remove_dir_all(target_dir);
+    }
+
+    #[test]
+    fn import_sync_packet_applies_account_dependencies_before_entries() {
+        let source_dir = temp_test_dir("sbt_sync_dependency_source");
+        let source_state = make_test_state(&source_dir);
+        ensure_environment(&source_state).unwrap();
+
+        let source_conn = open_connection(&source_state.env.db_path).unwrap();
+        let account = Account {
+            id: "legacy-primary".into(),
+            name: "Legacy Primary".into(),
+            r#type: AccountType::Checking,
+            opening_balance: 250.0,
+            archived: false,
+            created_at: "2026-04-21T09:00:00".into(),
+            current_balance: 250.0,
+        };
+        let entry = LedgerEntry {
+            id: "legacy-entry".into(),
+            account_id: account.id.clone(),
+            entry_kind: EntryKind::Expense,
+            amount: 25.0,
+            occurred_at_local: "2026-04-21T12:00:00".into(),
+            label: "Lunch".into(),
+            category: "food".into(),
+            notes: "".into(),
+            recurring_rule_id: None,
+            transfer_group_id: None,
+            exclude_from_insights: false,
+        };
+        insert_account_raw(&source_conn, &account).unwrap();
+        insert_entry_raw(&source_conn, &entry).unwrap();
+        queue_sync_outbox(&source_conn, "ledger_entry", &entry.id, "upsert", &entry).unwrap();
+
+        let packet_path = source_dir.join("sync.json");
+        export_sync_packet_internal(&source_state, &packet_path.to_string_lossy()).unwrap();
+
+        let target_dir = temp_test_dir("sbt_sync_dependency_target");
+        let target_state = make_test_state(&target_dir);
+        ensure_environment(&target_state).unwrap();
+
+        let result =
+            import_sync_packet_internal(&target_state, &packet_path.to_string_lossy()).unwrap();
+        assert_eq!(result.imported_operations, 1);
+
+        let target_conn = open_connection(&target_state.env.db_path).unwrap();
+        let accounts = fetch_accounts(&target_conn).unwrap();
+        let entries = fetch_entries(&target_conn).unwrap();
+        assert!(accounts.iter().any(|item| item.id == "legacy-primary"));
+        assert!(entries.iter().any(|item| item.id == "legacy-entry"));
 
         let _ = fs::remove_dir_all(source_dir);
         let _ = fs::remove_dir_all(target_dir);

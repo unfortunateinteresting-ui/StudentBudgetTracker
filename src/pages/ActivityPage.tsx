@@ -3,16 +3,18 @@ import { useMemo, useState } from "react";
 import { deleteEntry } from "../lib/api";
 import { QuickAddBar } from "../components/QuickAddBar";
 import { compactDate, currency, monthLabel } from "../lib/format";
-import type { Account, LedgerEntry } from "../lib/types";
+import type { Account, LedgerEntry, MonthlyCap, RecurringRule } from "../lib/types";
 import { MetricCard } from "../components/MetricCard";
 import styles from "./Page.module.css";
 
 interface ActivityPageProps {
   accounts: Account[];
   entries: LedgerEntry[];
+  monthlyCaps: MonthlyCap[];
   onCreate: () => void;
   onEdit: (entry: LedgerEntry) => void;
   onRefresh: () => Promise<void>;
+  recurringRules: RecurringRule[];
 }
 
 type ActivityTotals = {
@@ -34,9 +36,11 @@ const zeroTotals = (): ActivityTotals => ({
 export function ActivityPage({
   accounts,
   entries,
+  monthlyCaps,
   onCreate,
   onEdit,
   onRefresh,
+  recurringRules,
 }: ActivityPageProps) {
   const [search, setSearch] = useState("");
   const [monthKey, setMonthKey] = useState("");
@@ -129,7 +133,13 @@ export function ActivityPage({
         </button>
       </div>
 
-      <QuickAddBar accounts={accounts} onSaved={onRefresh} />
+      <QuickAddBar
+        accounts={accounts}
+        entries={entries}
+        monthlyCaps={monthlyCaps}
+        onSaved={onRefresh}
+        recurringRules={recurringRules}
+      />
 
       <div className={styles.grid3}>
         <MetricCard

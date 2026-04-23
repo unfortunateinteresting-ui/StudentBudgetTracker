@@ -96,9 +96,11 @@ describe("ActivityPage", () => {
       <ActivityPage
         accounts={accounts}
         entries={entries}
+        monthlyCaps={[]}
         onCreate={vi.fn()}
         onEdit={vi.fn()}
         onRefresh={vi.fn().mockResolvedValue(undefined)}
+        recurringRules={[]}
       />,
     );
 
@@ -117,9 +119,11 @@ describe("ActivityPage", () => {
       <ActivityPage
         accounts={accounts}
         entries={entries}
+        monthlyCaps={[]}
         onCreate={vi.fn()}
         onEdit={vi.fn()}
         onRefresh={vi.fn().mockResolvedValue(undefined)}
+        recurringRules={[]}
       />,
     );
 
@@ -142,9 +146,11 @@ describe("ActivityPage", () => {
       <ActivityPage
         accounts={accounts}
         entries={entries}
+        monthlyCaps={[]}
         onCreate={vi.fn()}
         onEdit={vi.fn()}
         onRefresh={onRefresh}
+        recurringRules={[]}
       />,
     );
 

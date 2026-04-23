@@ -197,9 +197,11 @@ export function App() {
           <ActivityPage
             accounts={bootstrap.accounts}
             entries={bootstrap.entries}
+            monthlyCaps={bootstrap.monthly_caps}
             onCreate={openGuidedCreate}
             onEdit={openGuidedEdit}
             onRefresh={refresh}
+            recurringRules={bootstrap.recurring_rules}
           />
         );
       case "plan":
@@ -234,8 +236,11 @@ export function App() {
         return (
           <HomePage
             accounts={bootstrap.accounts}
+            entries={bootstrap.entries}
+            monthlyCaps={bootstrap.monthly_caps}
             onRefresh={refresh}
             onWhy={handleWhy}
+            recurringRules={bootstrap.recurring_rules}
             snapshot={bootstrap.insight_snapshot}
           />
         );
@@ -294,10 +299,13 @@ export function App() {
 
       <EntryDialog
         accounts={bootstrap?.accounts ?? []}
+        entries={bootstrap?.entries ?? []}
         entry={editingEntry}
+        monthlyCaps={bootstrap?.monthly_caps ?? []}
         onOpenChange={setEntryDialogOpen}
         onSaved={refresh}
         open={entryDialogOpen}
+        recurringRules={bootstrap?.recurring_rules ?? []}
       />
       <WhyDialog breakdown={breakdown} onOpenChange={setWhyOpen} open={whyOpen} />
     </div>

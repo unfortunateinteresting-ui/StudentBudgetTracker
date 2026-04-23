@@ -57,11 +57,51 @@ describe("QuickAddBar", () => {
           entry_kind: "expense",
           amount: 42,
           label: "groceries",
+          category: "misc",
         }),
       );
     });
     expect(onSaved).toHaveBeenCalled();
-    expect(screen.getByText("Saved to Checking.")).toBeInTheDocument();
+    expect(screen.getByText("Saved to Checking as misc.")).toBeInTheDocument();
+  });
+
+  it("uses the selected category for quick add", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <QuickAddBar
+        accounts={[activeAccount]}
+        entries={[
+          {
+            id: "entry-1",
+            account_id: "active-1",
+            entry_kind: "expense",
+            amount: 20,
+            occurred_at_local: "2026-04-22T10:00:00",
+            label: "Bus",
+            category: "transport",
+            notes: "",
+            recurring_rule_id: null,
+            transfer_group_id: null,
+            exclude_from_insights: false,
+          },
+        ]}
+        onSaved={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    await user.selectOptions(screen.getByLabelText("Quick add category"), "transport");
+    await user.type(screen.getByLabelText("Quick add expense"), "9 bus pass");
+    await user.click(screen.getByRole("button", { name: "Add expense" }));
+
+    await waitFor(() => {
+      expect(api.createEntry).toHaveBeenCalledWith(
+        expect.objectContaining({
+          category: "transport",
+          label: "bus pass",
+        }),
+      );
+    });
   });
 
   it("stays disabled when there are no active accounts", () => {

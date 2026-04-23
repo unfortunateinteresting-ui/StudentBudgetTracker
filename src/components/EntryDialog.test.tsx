@@ -68,4 +68,51 @@ describe("EntryDialog", () => {
       screen.getByText("Create or restore an active account before adding a new entry."),
     ).toBeInTheDocument();
   });
+
+  it("shows label and category suggestions from existing data", () => {
+    render(
+      <EntryDialog
+        accounts={[activeAccount]}
+        entries={[
+          {
+            id: "entry-1",
+            account_id: "active-1",
+            entry_kind: "expense",
+            amount: 15,
+            occurred_at_local: "2026-04-22T10:00:00",
+            label: "Groceries",
+            category: "food",
+            notes: "",
+            recurring_rule_id: null,
+            transfer_group_id: null,
+            exclude_from_insights: false,
+          },
+        ]}
+        entry={null}
+        monthlyCaps={[
+          {
+            id: "cap-1",
+            category: "transport",
+            amount: 120,
+            month_key: "2026-04",
+          },
+        ]}
+        onOpenChange={vi.fn()}
+        onSaved={vi.fn().mockResolvedValue(undefined)}
+        open
+        recurringRules={[]}
+      />,
+    );
+
+    expect(screen.getByPlaceholderText("Pick or type a label")).toHaveAttribute(
+      "list",
+      "entry-label-options",
+    );
+    expect(screen.getByPlaceholderText("Pick or type a category")).toHaveAttribute(
+      "list",
+      "entry-category-options",
+    );
+    expect(document.querySelector('datalist#entry-label-options option[value="Groceries"]')).not.toBeNull();
+    expect(document.querySelector('datalist#entry-category-options option[value="transport"]')).not.toBeNull();
+  });
 });

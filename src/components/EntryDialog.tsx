@@ -3,15 +3,19 @@ import { useEffect, useMemo, useState } from "react";
 
 import { createEntry, updateEntry } from "../lib/api";
 import { localNowIso } from "../lib/format";
-import type { Account, EntryKind, LedgerEntry } from "../lib/types";
+import { categoryOptions, labelOptions } from "../lib/suggestions";
+import type { Account, EntryKind, LedgerEntry, MonthlyCap, RecurringRule } from "../lib/types";
 import styles from "./Dialog.module.css";
 
 interface EntryDialogProps {
   accounts: Account[];
+  entries?: LedgerEntry[];
   entry?: LedgerEntry | null;
+  monthlyCaps?: MonthlyCap[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSaved: () => Promise<void>;
+  recurringRules?: RecurringRule[];
 }
 
 const ENTRY_KINDS: Exclude<EntryKind, "transfer">[] = [
@@ -23,10 +27,13 @@ const ENTRY_KINDS: Exclude<EntryKind, "transfer">[] = [
 
 export function EntryDialog({
   accounts,
+  entries = [],
   entry,
+  monthlyCaps = [],
   open,
   onOpenChange,
   onSaved,
+  recurringRules = [],
 }: EntryDialogProps) {
   const activeAccounts = useMemo(
     () => accounts.filter((account) => !account.archived),
@@ -40,6 +47,14 @@ export function EntryDialog({
   const [category, setCategory] = useState("misc");
   const [notes, setNotes] = useState("");
   const [exclude, setExclude] = useState(false);
+  const labelChoices = useMemo(
+    () => labelOptions(entries, recurringRules),
+    [entries, recurringRules],
+  );
+  const categoryChoices = useMemo(
+    () => categoryOptions(entries, recurringRules, monthlyCaps),
+    [entries, monthlyCaps, recurringRules],
+  );
   const accountOptions = useMemo(() => {
     const options = [...activeAccounts];
     const selectedAccount = accounts.find((account) => account.id === accountId);
@@ -190,17 +205,31 @@ export function EntryDialog({
               <span>Label</span>
               <input
                 className={styles.input}
+                list="entry-label-options"
                 onChange={(event) => setLabel(event.target.value)}
+                placeholder="Pick or type a label"
                 value={label}
               />
+              <datalist id="entry-label-options">
+                {labelChoices.map((item) => (
+                  <option key={item} value={item} />
+                ))}
+              </datalist>
             </label>
             <label className={styles.field}>
               <span>Category</span>
               <input
                 className={styles.input}
+                list="entry-category-options"
                 onChange={(event) => setCategory(event.target.value)}
+                placeholder="Pick or type a category"
                 value={category}
               />
+              <datalist id="entry-category-options">
+                {categoryChoices.map((item) => (
+                  <option key={item} value={item} />
+                ))}
+              </datalist>
             </label>
             <label className={`${styles.field} ${styles.fieldWide}`}>
               <span>Notes</span>

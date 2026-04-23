@@ -222,12 +222,20 @@ pub struct SyncOperationRecord {
     pub created_at_utc: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SyncPacketDependencies {
+    #[serde(default)]
+    pub accounts: Vec<Account>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncPacket {
     pub app: String,
     pub schema_version: u32,
     pub generated_at_utc: String,
     pub source: SyncDeviceIdentity,
+    #[serde(default)]
+    pub dependencies: SyncPacketDependencies,
     pub operations: Vec<SyncOperationRecord>,
 }
 

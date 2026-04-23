@@ -5,17 +5,28 @@ import { MetricCard } from "../components/MetricCard";
 import { QuickAddBar } from "../components/QuickAddBar";
 import { SectionCard } from "../components/SectionCard";
 import { compactDate, currency } from "../lib/format";
-import type { Account, InsightSnapshot } from "../lib/types";
+import type { Account, InsightSnapshot, LedgerEntry, MonthlyCap, RecurringRule } from "../lib/types";
 import styles from "./Page.module.css";
 
 interface HomePageProps {
   accounts: Account[];
+  entries: LedgerEntry[];
+  monthlyCaps: MonthlyCap[];
   snapshot: InsightSnapshot;
   onRefresh: () => Promise<void>;
   onWhy: (metricId: string) => void;
+  recurringRules: RecurringRule[];
 }
 
-export function HomePage({ accounts, snapshot, onRefresh, onWhy }: HomePageProps) {
+export function HomePage({
+  accounts,
+  entries,
+  monthlyCaps,
+  snapshot,
+  onRefresh,
+  onWhy,
+  recurringRules,
+}: HomePageProps) {
   const accountNameById = useMemo(
     () => new Map(accounts.map((account) => [account.id, account.name])),
     [accounts],
@@ -34,7 +45,13 @@ export function HomePage({ accounts, snapshot, onRefresh, onWhy }: HomePageProps
         </div>
       </div>
 
-      <QuickAddBar accounts={accounts} onSaved={onRefresh} />
+      <QuickAddBar
+        accounts={accounts}
+        entries={entries}
+        monthlyCaps={monthlyCaps}
+        onSaved={onRefresh}
+        recurringRules={recurringRules}
+      />
 
       <div className={styles.grid4}>
         <MetricCard

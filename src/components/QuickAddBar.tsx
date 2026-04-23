@@ -2,21 +2,36 @@ import { useEffect, useMemo, useState } from "react";
 
 import { createEntry } from "../lib/api";
 import { parseQuickAdd } from "../lib/quickAdd";
-import type { Account } from "../lib/types";
+import { categoryOptions } from "../lib/suggestions";
+import type { Account, LedgerEntry, MonthlyCap, RecurringRule } from "../lib/types";
 import styles from "./QuickAddBar.module.css";
 
 interface QuickAddBarProps {
   accounts: Account[];
+  entries?: LedgerEntry[];
+  monthlyCaps?: MonthlyCap[];
   onSaved: () => Promise<void>;
+  recurringRules?: RecurringRule[];
 }
 
-export function QuickAddBar({ accounts, onSaved }: QuickAddBarProps) {
+export function QuickAddBar({
+  accounts,
+  entries = [],
+  monthlyCaps = [],
+  onSaved,
+  recurringRules = [],
+}: QuickAddBarProps) {
   const activeAccounts = useMemo(
     () => accounts.filter((account) => !account.archived),
     [accounts],
   );
+  const categories = useMemo(
+    () => categoryOptions(entries, recurringRules, monthlyCaps),
+    [entries, monthlyCaps, recurringRules],
+  );
   const [value, setValue] = useState("");
   const [accountId, setAccountId] = useState("");
+  const [category, setCategory] = useState("misc");
   const [status, setStatus] = useState("");
   const activeAccount =
     activeAccounts.find((item) => item.id === accountId) ?? activeAccounts[0];
@@ -40,7 +55,7 @@ export function QuickAddBar({ accounts, onSaved }: QuickAddBarProps) {
       return;
     }
 
-    const input = parseQuickAdd(value, activeAccount);
+    const input = parseQuickAdd(value, activeAccount, category);
     if (!input) {
       setStatus("Use the quick format: 42 groceries");
       return;
@@ -49,7 +64,7 @@ export function QuickAddBar({ accounts, onSaved }: QuickAddBarProps) {
     try {
       await createEntry(input);
       setValue("");
-      setStatus(`Saved to ${activeAccount.name}.`);
+      setStatus(`Saved to ${activeAccount.name} as ${category}.`);
       await onSaved();
     } catch (error) {
       setStatus(String(error));
@@ -75,6 +90,18 @@ export function QuickAddBar({ accounts, onSaved }: QuickAddBarProps) {
           {activeAccounts.map((account) => (
             <option key={account.id} value={account.id}>
               {account.name}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Quick add category"
+          className={styles.select}
+          onChange={(event) => setCategory(event.target.value)}
+          value={category}
+        >
+          {categories.map((item) => (
+            <option key={item} value={item}>
+              {item}
             </option>
           ))}
         </select>
