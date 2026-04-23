@@ -4,6 +4,7 @@ import {
   archiveAccount,
   createAccount,
   createTransfer,
+  deleteAccount,
   reconcileAccount,
   updateAccount,
 } from "../lib/api";
@@ -135,6 +136,7 @@ export function AccountsPage({ accounts, onRefresh }: AccountsPageProps) {
           updateAccount(editingAccountId, {
             name: account.name.trim(),
             type: account.type,
+            opening_balance: Number(account.opening_balance || 0),
           }),
         `Updated ${account.name.trim()}.`,
       );
@@ -249,6 +251,21 @@ export function AccountsPage({ accounts, onRefresh }: AccountsPageProps) {
     );
   };
 
+  const handleDeleteAccount = async (accountItem: Account) => {
+    const confirmed = window.confirm(
+      `Delete ${accountItem.name}? This removes the account, its entries, transfer links, and recurring rules. Use Archive if you only want to hide it.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    if (editingAccountId === accountItem.id) {
+      resetAccountForm();
+    }
+
+    await runAction(() => deleteAccount(accountItem.id), `Deleted ${accountItem.name}.`);
+  };
+
   return (
     <div className={styles.page}>
       <div className={styles.hero}>
@@ -319,7 +336,6 @@ export function AccountsPage({ accounts, onRefresh }: AccountsPageProps) {
             </select>
             <input
               className={styles.input}
-              disabled={Boolean(editingAccountId)}
               onChange={(event) =>
                 setAccount({ ...account, opening_balance: event.target.value })
               }
@@ -391,6 +407,13 @@ export function AccountsPage({ accounts, onRefresh }: AccountsPageProps) {
                             type="button"
                           >
                             {accountItem.archived ? "Restore" : "Archive"}
+                          </button>
+                          <button
+                            className={styles.dangerButton}
+                            onClick={() => void handleDeleteAccount(accountItem)}
+                            type="button"
+                          >
+                            Delete
                           </button>
                         </div>
                       </td>

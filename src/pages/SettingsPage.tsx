@@ -295,7 +295,7 @@ export function SettingsPage({
       const result = await syncWithLanPeer({ address, port });
       setNotice({
         kind: "success",
-        text: `Synced ${result.sent_operations} queued operations to ${result.peer_device_name}. Peer imported ${result.peer_imported_operations} new operations.`,
+        text: `Synced with ${result.peer_device_name}. Sent ${result.sent_operations} queued operations; peer imported ${result.peer_imported_operations}. This device imported ${result.local_imported_operations}.`,
       });
       await onRefresh();
       await refreshLanPeers(true);

@@ -42,6 +42,9 @@ export const updateAccount = (accountId: string, input: UpdateAccountInput) =>
 export const archiveAccount = (accountId: string) =>
   invoke("archive_account", { accountId });
 
+export const deleteAccount = (accountId: string) =>
+  invoke("delete_account", { accountId });
+
 export const createEntry = (input: CreateEntryInput) =>
   invoke("create_entry", { input });
 

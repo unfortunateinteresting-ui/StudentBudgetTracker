@@ -277,6 +277,8 @@ struct LanSyncResponse {
     imported_operations: u32,
     skipped_operations: u32,
     trusted_peer_added: bool,
+    #[serde(default)]
+    packet: Option<SyncPacket>,
 }
 
 impl AppEnv {
@@ -445,6 +447,7 @@ pub fn run() {
             create_account,
             update_account,
             archive_account,
+            delete_account,
             list_entries,
             create_entry,
             update_entry,
@@ -855,6 +858,7 @@ fn handle_incoming_lan_sync(app_handle: &AppHandle, mut stream: TcpStream) -> Ap
             imported_operations: 0,
             skipped_operations: 0,
             trusted_peer_added: false,
+            packet: None,
         };
         stream.write_all(&serde_json::to_vec(&response)?)?;
         return Ok(());
@@ -863,6 +867,7 @@ fn handle_incoming_lan_sync(app_handle: &AppHandle, mut stream: TcpStream) -> Ap
     match import_sync_packet_value_internal(&state, request.packet) {
         Ok(result) => {
             let conn = open_connection(&state.env.db_path)?;
+            let response_packet = build_sync_packet(&conn).ok();
             let response = LanSyncResponse {
                 app: SYNC_PACKET_APP_NAME.to_string(),
                 schema_version: SYNC_PACKET_SCHEMA_VERSION,
@@ -872,6 +877,7 @@ fn handle_incoming_lan_sync(app_handle: &AppHandle, mut stream: TcpStream) -> Ap
                 imported_operations: result.imported_operations,
                 skipped_operations: result.skipped_operations,
                 trusted_peer_added: result.trusted_peer_added,
+                packet: response_packet,
             };
             stream.write_all(&serde_json::to_vec(&response)?)?;
             emit_sync_updated(app_handle);
@@ -887,6 +893,7 @@ fn handle_incoming_lan_sync(app_handle: &AppHandle, mut stream: TcpStream) -> Ap
                 imported_operations: 0,
                 skipped_operations: 0,
                 trusted_peer_added: false,
+                packet: None,
             };
             stream.write_all(&serde_json::to_vec(&response)?)?;
             emit_sync_attention(app_handle, &format!("Incoming LAN sync failed: {err}"));
@@ -1883,6 +1890,265 @@ fn set_sync_peer_last_error(
     Ok(())
 }
 
+fn latest_local_operation_at(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: &str,
+) -> AppResult<Option<String>> {
+    conn.query_row(
+        "SELECT created_at_utc
+         FROM sync_outbox
+         WHERE entity_type = ?1 AND entity_id = ?2
+         ORDER BY op_seq DESC
+         LIMIT 1",
+        params![entity_type, entity_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn remote_operation_is_older_than_local(
+    conn: &Connection,
+    operation: &SyncOperationRecord,
+) -> AppResult<bool> {
+    Ok(
+        latest_local_operation_at(conn, &operation.entity_type, &operation.entity_id)?
+            .is_some_and(|local_created_at| local_created_at > operation.created_at_utc),
+    )
+}
+
+fn ledger_entry_content_equal(left: &LedgerEntry, right: &LedgerEntry) -> bool {
+    left.account_id == right.account_id
+        && left.entry_kind == right.entry_kind
+        && (left.amount - right.amount).abs() < 0.005
+        && left.occurred_at_local == right.occurred_at_local
+        && left.label == right.label
+        && left.category == right.category
+        && left.notes == right.notes
+        && left.recurring_rule_id == right.recurring_rule_id
+        && left.exclude_from_insights == right.exclude_from_insights
+}
+
+fn recurring_rule_content_equal(left: &RecurringRule, right: &RecurringRule) -> bool {
+    left.label == right.label
+        && left.entry_kind == right.entry_kind
+        && (left.amount - right.amount).abs() < 0.005
+        && left.account_id == right.account_id
+        && left.category == right.category
+        && left.notes == right.notes
+        && left.start_date == right.start_date
+        && left.end_date == right.end_date
+        && left.frequency == right.frequency
+        && left.status == right.status
+        && left.last_applied_local == right.last_applied_local
+}
+
+fn monthly_cap_content_equal(left: &MonthlyCap, right: &MonthlyCap) -> bool {
+    left.category == right.category
+        && left.month_key == right.month_key
+        && (left.amount - right.amount).abs() < 0.005
+}
+
+fn natural_duplicate_entry_exists(conn: &Connection, entry: &LedgerEntry) -> AppResult<bool> {
+    Ok(fetch_entries(conn)?
+        .into_iter()
+        .any(|existing| existing.id != entry.id && ledger_entry_content_equal(&existing, entry)))
+}
+
+fn entry_already_represented(conn: &Connection, entry: &LedgerEntry) -> AppResult<bool> {
+    if let Some(existing) = fetch_entry_by_id(conn, &entry.id)? {
+        return Ok(ledger_entry_content_equal(&existing, entry));
+    }
+    natural_duplicate_entry_exists(conn, entry)
+}
+
+fn mapped_account_id(account_id_map: &HashMap<String, String>, account_id: &str) -> String {
+    account_id_map
+        .get(account_id)
+        .cloned()
+        .unwrap_or_else(|| account_id.to_string())
+}
+
+fn remap_sync_operation_accounts(
+    operation: &SyncOperationRecord,
+    account_id_map: &HashMap<String, String>,
+) -> AppResult<Option<SyncOperationRecord>> {
+    match (
+        operation.entity_type.as_str(),
+        operation.operation_type.as_str(),
+    ) {
+        ("account", _) => {
+            if account_id_map
+                .get(&operation.entity_id)
+                .is_some_and(|mapped| mapped != &operation.entity_id)
+            {
+                return Ok(None);
+            }
+            Ok(Some(operation.clone()))
+        }
+        ("ledger_entry", "upsert") => {
+            let mut entry: LedgerEntry = serde_json::from_value(operation.payload_json.clone())?;
+            entry.account_id = mapped_account_id(account_id_map, &entry.account_id);
+            let mut remapped = operation.clone();
+            remapped.payload_json = serde_json::to_value(entry)?;
+            Ok(Some(remapped))
+        }
+        ("transfer_group", "upsert") => {
+            let entries_value = operation
+                .payload_json
+                .get("entries")
+                .cloned()
+                .ok_or_else(|| anyhow!("Transfer packet is missing entries."))?;
+            let mut entries: Vec<LedgerEntry> = serde_json::from_value(entries_value)?;
+            for entry in &mut entries {
+                entry.account_id = mapped_account_id(account_id_map, &entry.account_id);
+            }
+            let mut remapped = operation.clone();
+            remapped.payload_json = json!({ "entries": entries });
+            Ok(Some(remapped))
+        }
+        ("recurring_rule", "upsert") => {
+            let mut rule: RecurringRule = serde_json::from_value(operation.payload_json.clone())?;
+            rule.account_id = mapped_account_id(account_id_map, &rule.account_id);
+            let mut remapped = operation.clone();
+            remapped.payload_json = serde_json::to_value(rule)?;
+            Ok(Some(remapped))
+        }
+        _ => Ok(Some(operation.clone())),
+    }
+}
+
+fn sync_operation_is_redundant_or_conflicting(
+    conn: &Connection,
+    operation: &SyncOperationRecord,
+) -> AppResult<bool> {
+    match (
+        operation.entity_type.as_str(),
+        operation.operation_type.as_str(),
+    ) {
+        ("account", "upsert") => {
+            let incoming: Account = serde_json::from_value(operation.payload_json.clone())?;
+            if let Some(existing) = fetch_account_by_id(conn, &incoming.id)? {
+                if account_storage_equal(&existing, &incoming) {
+                    return Ok(true);
+                }
+            }
+            remote_operation_is_older_than_local(conn, operation)
+        }
+        ("account", "delete") => {
+            if fetch_account_by_id(conn, &operation.entity_id)?.is_none() {
+                return Ok(true);
+            }
+            remote_operation_is_older_than_local(conn, operation)
+        }
+        ("ledger_entry", "upsert") => {
+            let incoming: LedgerEntry = serde_json::from_value(operation.payload_json.clone())?;
+            if entry_already_represented(conn, &incoming)? {
+                return Ok(true);
+            }
+            remote_operation_is_older_than_local(conn, operation)
+        }
+        ("ledger_entry", "delete") => {
+            if fetch_entry_by_id(conn, &operation.entity_id)?.is_none() {
+                return Ok(true);
+            }
+            remote_operation_is_older_than_local(conn, operation)
+        }
+        ("transfer_group", "upsert") => {
+            let entries_value = operation
+                .payload_json
+                .get("entries")
+                .cloned()
+                .ok_or_else(|| anyhow!("Transfer packet is missing entries."))?;
+            let entries: Vec<LedgerEntry> = serde_json::from_value(entries_value)?;
+            if entries
+                .iter()
+                .all(|entry| entry_already_represented(conn, entry).unwrap_or(false))
+            {
+                return Ok(true);
+            }
+            remote_operation_is_older_than_local(conn, operation)
+        }
+        ("transfer_group", "delete") => {
+            let group_id = operation
+                .payload_json
+                .get("transfer_group_id")
+                .and_then(Value::as_str)
+                .unwrap_or(operation.entity_id.as_str());
+            if fetch_entries_by_transfer_group(conn, group_id)?.is_empty() {
+                return Ok(true);
+            }
+            remote_operation_is_older_than_local(conn, operation)
+        }
+        ("recurring_rule", "upsert") => {
+            let incoming: RecurringRule = serde_json::from_value(operation.payload_json.clone())?;
+            if let Some(existing) = fetch_recurring_rules(conn)?
+                .into_iter()
+                .find(|rule| rule.id == incoming.id)
+            {
+                if recurring_rule_content_equal(&existing, &incoming) {
+                    return Ok(true);
+                }
+            }
+            remote_operation_is_older_than_local(conn, operation)
+        }
+        ("recurring_rule", "delete") => {
+            let exists = fetch_recurring_rules(conn)?
+                .into_iter()
+                .any(|rule| rule.id == operation.entity_id);
+            if !exists {
+                return Ok(true);
+            }
+            remote_operation_is_older_than_local(conn, operation)
+        }
+        ("monthly_cap", "upsert") => {
+            let incoming: MonthlyCap = serde_json::from_value(operation.payload_json.clone())?;
+            if fetch_monthly_caps(conn)?.into_iter().any(|cap| {
+                (cap.id == incoming.id
+                    || (cap.category == incoming.category && cap.month_key == incoming.month_key))
+                    && monthly_cap_content_equal(&cap, &incoming)
+            }) {
+                return Ok(true);
+            }
+            remote_operation_is_older_than_local(conn, operation)
+        }
+        ("monthly_cap", "delete") => {
+            let exists = fetch_monthly_caps(conn)?
+                .into_iter()
+                .any(|cap| cap.id == operation.entity_id);
+            if !exists {
+                return Ok(true);
+            }
+            remote_operation_is_older_than_local(conn, operation)
+        }
+        ("shared_settings", "upsert") => {
+            let incoming: AppSettings = serde_json::from_value(operation.payload_json.clone())?;
+            let existing = fetch_settings(conn)?;
+            Ok(
+                existing.school_year_start_month == incoming.school_year_start_month
+                    && existing.planning_start_month_key == incoming.planning_start_month_key
+                    && existing.school_year_months == incoming.school_year_months
+                    && existing.language == incoming.language
+                    && existing.backup_retention == incoming.backup_retention
+                    && existing.last_migration_version == incoming.last_migration_version,
+            )
+        }
+        _ => Ok(false),
+    }
+}
+
+fn apply_sync_operation_if_needed(
+    conn: &Connection,
+    operation: &SyncOperationRecord,
+) -> AppResult<bool> {
+    if sync_operation_is_redundant_or_conflicting(conn, operation)? {
+        return Ok(false);
+    }
+    apply_sync_operation(conn, operation)?;
+    Ok(true)
+}
+
 fn apply_sync_operation(conn: &Connection, operation: &SyncOperationRecord) -> AppResult<()> {
     match (
         operation.entity_type.as_str(),
@@ -1891,6 +2157,9 @@ fn apply_sync_operation(conn: &Connection, operation: &SyncOperationRecord) -> A
         ("account", "upsert") => {
             let account: Account = serde_json::from_value(operation.payload_json.clone())?;
             insert_account_raw(conn, &account)?;
+        }
+        ("account", "delete") => {
+            delete_account_and_history_raw(conn, &operation.entity_id)?;
         }
         ("ledger_entry", "upsert") => {
             let entry: LedgerEntry = serde_json::from_value(operation.payload_json.clone())?;
@@ -2226,6 +2495,44 @@ fn insert_account_raw(conn: &Connection, account: &Account) -> AppResult<()> {
     Ok(())
 }
 
+fn account_storage_equal(left: &Account, right: &Account) -> bool {
+    left.name == right.name
+        && left.r#type == right.r#type
+        && (left.opening_balance - right.opening_balance).abs() < 0.005
+        && left.archived == right.archived
+}
+
+fn account_match_key(account: &Account) -> (String, &'static str) {
+    (
+        account.name.trim().to_lowercase(),
+        stringify_account_type(&account.r#type),
+    )
+}
+
+fn equivalent_local_account_id(conn: &Connection, remote: &Account) -> AppResult<Option<String>> {
+    let remote_key = account_match_key(remote);
+    let matches = fetch_accounts(conn)?
+        .into_iter()
+        .filter(|account| account.id != remote.id && account_match_key(account) == remote_key)
+        .collect::<Vec<_>>();
+    Ok(if matches.len() == 1 {
+        Some(matches[0].id.clone())
+    } else {
+        None
+    })
+}
+
+fn insert_account_dependency_if_missing(conn: &Connection, account: &Account) -> AppResult<String> {
+    if fetch_account_by_id(conn, &account.id)?.is_some() {
+        return Ok(account.id.clone());
+    }
+    if let Some(local_id) = equivalent_local_account_id(conn, account)? {
+        return Ok(local_id);
+    }
+    insert_account_raw(conn, account)?;
+    Ok(account.id.clone())
+}
+
 fn delete_entry_raw(conn: &Connection, entry_id: &str) -> AppResult<()> {
     conn.execute("DELETE FROM ledger_entries WHERE id = ?1", [entry_id])?;
     Ok(())
@@ -2243,6 +2550,57 @@ fn delete_cap_raw(conn: &Connection, cap_id: &str) -> AppResult<()> {
 
 fn delete_account_raw(conn: &Connection, account_id: &str) -> AppResult<()> {
     conn.execute("DELETE FROM accounts WHERE id = ?1", [account_id])?;
+    Ok(())
+}
+
+fn account_dependent_ids(
+    conn: &Connection,
+    account_id: &str,
+) -> AppResult<(Vec<String>, Vec<String>, Vec<String>)> {
+    let mut transfer_groups = BTreeSet::new();
+    let mut entry_ids = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT id, transfer_group_id FROM ledger_entries WHERE account_id = ?1 ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map([account_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })?;
+    for row in rows {
+        let (entry_id, transfer_group_id) = row?;
+        if let Some(group_id) = transfer_group_id {
+            transfer_groups.insert(group_id);
+        } else {
+            entry_ids.push(entry_id);
+        }
+    }
+
+    let mut rule_ids = Vec::new();
+    let mut stmt = conn.prepare("SELECT id FROM recurring_rules WHERE account_id = ?1")?;
+    let rows = stmt.query_map([account_id], |row| row.get::<_, String>(0))?;
+    for row in rows {
+        rule_ids.push(row?);
+    }
+
+    Ok((entry_ids, transfer_groups.into_iter().collect(), rule_ids))
+}
+
+fn delete_account_and_history_raw(conn: &Connection, account_id: &str) -> AppResult<()> {
+    let (_, transfer_group_ids, _) = account_dependent_ids(conn, account_id)?;
+    for group_id in transfer_group_ids {
+        conn.execute(
+            "DELETE FROM ledger_entries WHERE transfer_group_id = ?1",
+            [group_id],
+        )?;
+    }
+    conn.execute(
+        "DELETE FROM ledger_entries WHERE account_id = ?1",
+        [account_id],
+    )?;
+    conn.execute(
+        "DELETE FROM recurring_rules WHERE account_id = ?1",
+        [account_id],
+    )?;
+    delete_account_raw(conn, account_id)?;
     Ok(())
 }
 fn month_end_day(year: i32, month: u32) -> u32 {
@@ -3815,6 +4173,7 @@ fn import_sync_packet_value_internal(
         let mut imported_operations = 0u32;
         let mut skipped_operations = 0u32;
         let mut max_received_seq = last_received_seq;
+        let mut account_id_map = HashMap::new();
         let new_operations = packet
             .operations
             .iter()
@@ -3829,23 +4188,38 @@ fn import_sync_packet_value_internal(
             .collect::<Vec<_>>();
 
         for account in &packet.dependencies.accounts {
-            insert_account_raw(&tx, account)?;
+            let local_id = insert_account_dependency_if_missing(&tx, account)?;
+            account_id_map.insert(account.id.clone(), local_id);
         }
 
         for operation in new_operations.iter().filter(|operation| {
             operation.entity_type == "account" && operation.operation_type == "upsert"
         }) {
-            apply_sync_operation(&tx, operation)?;
-            imported_operations += 1;
             max_received_seq = max_received_seq.max(operation.op_seq);
+            let Some(operation) = remap_sync_operation_accounts(operation, &account_id_map)? else {
+                skipped_operations += 1;
+                continue;
+            };
+            if apply_sync_operation_if_needed(&tx, &operation)? {
+                imported_operations += 1;
+            } else {
+                skipped_operations += 1;
+            }
         }
 
         for operation in new_operations.iter().filter(|operation| {
             !(operation.entity_type == "account" && operation.operation_type == "upsert")
         }) {
-            apply_sync_operation(&tx, operation)?;
-            imported_operations += 1;
             max_received_seq = max_received_seq.max(operation.op_seq);
+            let Some(operation) = remap_sync_operation_accounts(operation, &account_id_map)? else {
+                skipped_operations += 1;
+                continue;
+            };
+            if apply_sync_operation_if_needed(&tx, &operation)? {
+                imported_operations += 1;
+            } else {
+                skipped_operations += 1;
+            }
         }
 
         let synced_at = now_local_iso();
@@ -4057,6 +4431,18 @@ fn sync_with_lan_peer_internal(
 
     let conn = open_connection(&state.env.db_path)?;
     record_successful_outbound_sync(&conn, &response.source, last_sent_seq)?;
+    drop(conn);
+
+    let (local_imported_operations, local_skipped_operations) =
+        if let Some(packet) = response.packet {
+            let import_result = import_sync_packet_value_internal(state, packet)?;
+            (
+                import_result.imported_operations,
+                import_result.skipped_operations,
+            )
+        } else {
+            (0, 0)
+        };
 
     Ok(LanSyncSendResult {
         peer_device_id: response.source.device_id,
@@ -4066,6 +4452,8 @@ fn sync_with_lan_peer_internal(
         sent_operations,
         peer_imported_operations: response.imported_operations,
         peer_skipped_operations: response.skipped_operations,
+        local_imported_operations,
+        local_skipped_operations,
     })
 }
 
@@ -4174,11 +4562,13 @@ fn update_account(
         .into_iter()
         .find(|account| account.id == account_id)
         .ok_or_else(|| "Account not found".to_string())?;
+    let opening_balance = input.opening_balance.unwrap_or(current.opening_balance);
     let updated = Account {
         name: input.name.unwrap_or(current.name.clone()),
         r#type: input.r#type.unwrap_or(current.r#type.clone()),
+        opening_balance,
         archived: input.archived.unwrap_or(current.archived),
-        current_balance: current.current_balance,
+        current_balance: current.current_balance + (opening_balance - current.opening_balance),
         ..current.clone()
     };
     let tx = conn.transaction().map_err(|err| err.to_string())?;
@@ -4210,6 +4600,68 @@ fn archive_account(state: State<'_, AppState>, account_id: String) -> Result<Acc
             ..Default::default()
         },
     )
+}
+
+#[tauri::command]
+fn delete_account(state: State<'_, AppState>, account_id: String) -> Result<(), String> {
+    ensure_environment(&state).map_err(|err| err.to_string())?;
+    let mut conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
+    fetch_account_by_id(&conn, &account_id)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "Account not found".to_string())?;
+
+    let snapshot = snapshot_payload(&conn).map_err(|err| err.to_string())?;
+    let (entry_ids, transfer_group_ids, rule_ids) =
+        account_dependent_ids(&conn, &account_id).map_err(|err| err.to_string())?;
+
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    for group_id in &transfer_group_ids {
+        queue_sync_outbox_value(
+            &tx,
+            "transfer_group",
+            group_id,
+            "delete",
+            json!({ "transfer_group_id": group_id }),
+        )
+        .map_err(|err| err.to_string())?;
+    }
+    for entry_id in &entry_ids {
+        queue_sync_outbox_value(
+            &tx,
+            "ledger_entry",
+            entry_id,
+            "delete",
+            json!({ "id": entry_id }),
+        )
+        .map_err(|err| err.to_string())?;
+    }
+    for rule_id in &rule_ids {
+        queue_sync_outbox_value(
+            &tx,
+            "recurring_rule",
+            rule_id,
+            "delete",
+            json!({ "id": rule_id }),
+        )
+        .map_err(|err| err.to_string())?;
+    }
+    delete_account_and_history_raw(&tx, &account_id).map_err(|err| err.to_string())?;
+    queue_sync_outbox_value(
+        &tx,
+        "account",
+        &account_id,
+        "delete",
+        json!({ "id": account_id.clone() }),
+    )
+    .map_err(|err| err.to_string())?;
+    tx.commit().map_err(|err| err.to_string())?;
+
+    push_undo(&state, UndoAction::RestoreSnapshot { payload: snapshot });
+    let retention = fetch_settings(&conn)
+        .map_err(|err| err.to_string())?
+        .backup_retention;
+    let _ = backup_database(&state.env, retention).map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -5368,8 +5820,8 @@ mod tests {
 
         let first =
             import_sync_packet_internal(&target_state, &packet_path.to_string_lossy()).unwrap();
-        assert_eq!(first.imported_operations, 2);
-        assert_eq!(first.skipped_operations, 0);
+        assert_eq!(first.imported_operations, 1);
+        assert_eq!(first.skipped_operations, 1);
         assert!(first.trusted_peer_added);
 
         let target_conn = open_connection(&target_state.env.db_path).unwrap();
@@ -5453,6 +5905,206 @@ mod tests {
     }
 
     #[test]
+    fn import_sync_packet_maps_equivalent_accounts_and_skips_duplicate_entries() {
+        let source_dir = temp_test_dir("sbt_sync_duplicate_source");
+        let source_state = make_test_state(&source_dir);
+        ensure_environment(&source_state).unwrap();
+
+        let source_conn = open_connection(&source_state.env.db_path).unwrap();
+        let remote_account = Account {
+            id: "remote-primary".into(),
+            name: "Primary Account".into(),
+            r#type: AccountType::Checking,
+            opening_balance: 400.0,
+            archived: false,
+            created_at: "2026-04-21T09:00:00".into(),
+            current_balance: 400.0,
+        };
+        let remote_entry = LedgerEntry {
+            id: "remote-food".into(),
+            account_id: remote_account.id.clone(),
+            entry_kind: EntryKind::Expense,
+            amount: 42.0,
+            occurred_at_local: "2026-04-21T12:00:00".into(),
+            label: "Groceries".into(),
+            category: "food".into(),
+            notes: "".into(),
+            recurring_rule_id: None,
+            transfer_group_id: None,
+            exclude_from_insights: false,
+        };
+        insert_account_raw(&source_conn, &remote_account).unwrap();
+        queue_sync_outbox(
+            &source_conn,
+            "account",
+            &remote_account.id,
+            "upsert",
+            &remote_account,
+        )
+        .unwrap();
+        insert_entry_raw(&source_conn, &remote_entry).unwrap();
+        queue_sync_outbox(
+            &source_conn,
+            "ledger_entry",
+            &remote_entry.id,
+            "upsert",
+            &remote_entry,
+        )
+        .unwrap();
+
+        let packet_path = source_dir.join("sync.json");
+        export_sync_packet_internal(&source_state, &packet_path.to_string_lossy()).unwrap();
+
+        let target_dir = temp_test_dir("sbt_sync_duplicate_target");
+        let target_state = make_test_state(&target_dir);
+        ensure_environment(&target_state).unwrap();
+        let target_conn = open_connection(&target_state.env.db_path).unwrap();
+        let local_account = Account {
+            id: "local-primary".into(),
+            name: "Primary Account".into(),
+            r#type: AccountType::Checking,
+            opening_balance: 400.0,
+            archived: false,
+            created_at: "2026-04-21T09:00:00".into(),
+            current_balance: 400.0,
+        };
+        let local_entry = LedgerEntry {
+            id: "local-food".into(),
+            account_id: local_account.id.clone(),
+            ..remote_entry.clone()
+        };
+        insert_account_raw(&target_conn, &local_account).unwrap();
+        insert_entry_raw(&target_conn, &local_entry).unwrap();
+        drop(target_conn);
+
+        let result =
+            import_sync_packet_internal(&target_state, &packet_path.to_string_lossy()).unwrap();
+        assert_eq!(result.imported_operations, 0);
+        assert_eq!(result.skipped_operations, 2);
+
+        let target_conn = open_connection(&target_state.env.db_path).unwrap();
+        let accounts = fetch_accounts(&target_conn).unwrap();
+        let entries = fetch_entries(&target_conn).unwrap();
+        assert!(accounts.iter().any(|item| item.id == "local-primary"));
+        assert!(!accounts.iter().any(|item| item.id == "remote-primary"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "local-food");
+
+        let _ = fs::remove_dir_all(source_dir);
+        let _ = fs::remove_dir_all(target_dir);
+    }
+
+    #[test]
+    fn delete_account_and_history_removes_dependent_rows_without_breaking_balances() {
+        let base_dir = temp_test_dir("sbt_delete_account_history");
+        let state = make_test_state(&base_dir);
+        ensure_environment(&state).unwrap();
+        let conn = open_connection(&state.env.db_path).unwrap();
+        let account = Account {
+            id: "delete-me".into(),
+            name: "Delete Me".into(),
+            r#type: AccountType::Checking,
+            opening_balance: 100.0,
+            archived: false,
+            created_at: "2026-04-21T09:00:00".into(),
+            current_balance: 100.0,
+        };
+        let other = Account {
+            id: "keep-me".into(),
+            name: "Keep Me".into(),
+            r#type: AccountType::Savings,
+            opening_balance: 50.0,
+            archived: false,
+            created_at: "2026-04-21T10:00:00".into(),
+            current_balance: 50.0,
+        };
+        insert_account_raw(&conn, &account).unwrap();
+        insert_account_raw(&conn, &other).unwrap();
+        insert_entry_raw(
+            &conn,
+            &LedgerEntry {
+                id: "delete-entry".into(),
+                account_id: account.id.clone(),
+                entry_kind: EntryKind::Expense,
+                amount: 10.0,
+                occurred_at_local: "2026-04-21T12:00:00".into(),
+                label: "Lunch".into(),
+                category: "food".into(),
+                notes: "".into(),
+                recurring_rule_id: None,
+                transfer_group_id: None,
+                exclude_from_insights: false,
+            },
+        )
+        .unwrap();
+        let transfer_group_id = "transfer-delete".to_string();
+        insert_entry_raw(
+            &conn,
+            &LedgerEntry {
+                id: "transfer-out".into(),
+                account_id: account.id.clone(),
+                entry_kind: EntryKind::Transfer,
+                amount: -20.0,
+                occurred_at_local: "2026-04-21T13:00:00".into(),
+                label: "Move".into(),
+                category: "transfer".into(),
+                notes: "".into(),
+                recurring_rule_id: None,
+                transfer_group_id: Some(transfer_group_id.clone()),
+                exclude_from_insights: true,
+            },
+        )
+        .unwrap();
+        insert_entry_raw(
+            &conn,
+            &LedgerEntry {
+                id: "transfer-in".into(),
+                account_id: other.id.clone(),
+                entry_kind: EntryKind::Transfer,
+                amount: 20.0,
+                occurred_at_local: "2026-04-21T13:00:00".into(),
+                label: "Move".into(),
+                category: "transfer".into(),
+                notes: "".into(),
+                recurring_rule_id: None,
+                transfer_group_id: Some(transfer_group_id),
+                exclude_from_insights: true,
+            },
+        )
+        .unwrap();
+        insert_rule_raw(
+            &conn,
+            &RecurringRule {
+                id: "rule-delete".into(),
+                label: "Rent".into(),
+                entry_kind: EntryKind::Expense,
+                amount: 100.0,
+                account_id: account.id.clone(),
+                category: "rent".into(),
+                notes: "".into(),
+                start_date: "2026-04-01".into(),
+                end_date: None,
+                frequency: RecurringFrequency::Monthly,
+                status: RecurringStatus::Automatic,
+                last_applied_local: None,
+            },
+        )
+        .unwrap();
+
+        delete_account_and_history_raw(&conn, &account.id).unwrap();
+
+        let accounts = fetch_accounts(&conn).unwrap();
+        let entries = fetch_entries(&conn).unwrap();
+        let rules = fetch_recurring_rules(&conn).unwrap();
+        assert!(!accounts.iter().any(|item| item.id == account.id));
+        assert!(accounts.iter().any(|item| item.id == other.id));
+        assert!(entries.is_empty());
+        assert!(rules.is_empty());
+
+        let _ = fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
     fn process_sync_inbox_imports_packets_and_archives_files() {
         let source_dir = temp_test_dir("sbt_sync_inbox_source");
         let source_state = make_test_state(&source_dir);
@@ -5485,7 +6137,8 @@ mod tests {
         assert_eq!(result.scanned_files, 1);
         assert_eq!(result.processed_files, 1);
         assert_eq!(result.failed_files, 0);
-        assert_eq!(result.imported_operations, 1);
+        assert_eq!(result.imported_operations, 0);
+        assert_eq!(result.skipped_operations, 1);
         assert_eq!(
             list_sync_packet_files(&sync_inbox_dir(&target_state.env))
                 .unwrap()

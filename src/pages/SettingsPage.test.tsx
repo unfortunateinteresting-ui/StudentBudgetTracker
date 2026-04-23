@@ -125,6 +125,8 @@ describe("SettingsPage", () => {
       sent_operations: 3,
       peer_imported_operations: 2,
       peer_skipped_operations: 1,
+      local_imported_operations: 1,
+      local_skipped_operations: 0,
     });
     vi.mocked(api.undoLastAction).mockResolvedValue(undefined);
     vi.mocked(api.updateAppSettings).mockResolvedValue(undefined);
@@ -572,7 +574,7 @@ describe("SettingsPage", () => {
     expect(onRefresh).toHaveBeenCalled();
     expect(
       screen.getByText(
-        "Synced 3 queued operations to Dorm desktop. Peer imported 2 new operations.",
+        "Synced with Dorm desktop. Sent 3 queued operations; peer imported 2. This device imported 1.",
       ),
     ).toBeInTheDocument();
   });

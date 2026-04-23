@@ -9,6 +9,7 @@ vi.mock("../lib/api", () => ({
   archiveAccount: vi.fn(),
   createAccount: vi.fn(),
   createTransfer: vi.fn(),
+  deleteAccount: vi.fn(),
   reconcileAccount: vi.fn(),
   updateAccount: vi.fn(),
 }));
@@ -40,6 +41,7 @@ describe("AccountsPage", () => {
     vi.mocked(api.archiveAccount).mockResolvedValue(undefined);
     vi.mocked(api.createAccount).mockResolvedValue(undefined);
     vi.mocked(api.createTransfer).mockResolvedValue(undefined);
+    vi.mocked(api.deleteAccount).mockResolvedValue(undefined);
     vi.mocked(api.reconcileAccount).mockResolvedValue(undefined);
     vi.mocked(api.updateAccount).mockResolvedValue(undefined);
   });
@@ -67,9 +69,34 @@ describe("AccountsPage", () => {
       expect(api.updateAccount).toHaveBeenCalledWith("account-1", {
         name: "Main checking",
         type: "checking",
+        opening_balance: 1000,
       });
     });
     expect(onRefresh).toHaveBeenCalled();
+  });
+
+  it("deletes an account only after confirmation", async () => {
+    const user = userEvent.setup();
+    const onRefresh = vi.fn().mockResolvedValue(undefined);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<AccountsPage accounts={accounts} onRefresh={onRefresh} />);
+
+    const checkingRow = screen
+      .getAllByText("Checking")
+      .map((node) => node.closest("tr"))
+      .find((row) => row && within(row).queryByRole("button", { name: "Delete" }));
+    expect(checkingRow).not.toBeNull();
+
+    await user.click(
+      within(checkingRow as HTMLTableRowElement).getByRole("button", { name: "Delete" }),
+    );
+
+    await waitFor(() => {
+      expect(api.deleteAccount).toHaveBeenCalledWith("account-1");
+    });
+    expect(onRefresh).toHaveBeenCalled();
+    confirmSpy.mockRestore();
   });
 
   it("archives active accounts and restores archived ones", async () => {

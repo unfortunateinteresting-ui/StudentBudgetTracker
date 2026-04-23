@@ -299,6 +299,8 @@ pub struct LanSyncSendResult {
     pub sent_operations: u32,
     pub peer_imported_operations: u32,
     pub peer_skipped_operations: u32,
+    pub local_imported_operations: u32,
+    pub local_skipped_operations: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,6 +342,7 @@ pub struct CreateAccountInput {
 pub struct UpdateAccountInput {
     pub name: Option<String>,
     pub r#type: Option<AccountType>,
+    pub opening_balance: Option<f64>,
     pub archived: Option<bool>,
 }
 

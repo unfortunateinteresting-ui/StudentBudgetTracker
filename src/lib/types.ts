@@ -223,6 +223,8 @@ export interface LanSyncSendResult {
   sent_operations: number;
   peer_imported_operations: number;
   peer_skipped_operations: number;
+  local_imported_operations: number;
+  local_skipped_operations: number;
 }
 
 export interface BootstrapState {
@@ -267,6 +269,7 @@ export interface CreateAccountInput {
 export interface UpdateAccountInput {
   name?: string;
   type?: AccountType;
+  opening_balance?: number;
   archived?: boolean;
 }
 

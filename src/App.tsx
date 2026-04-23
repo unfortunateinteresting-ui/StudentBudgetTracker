@@ -8,6 +8,12 @@ import {
   processSyncInbox,
   runStartupRecurringCheck,
 } from "./lib/api";
+import {
+  dismissMissedRecurring,
+  dismissSyncAlert,
+  filterDismissedMissedRecurring,
+  isSyncAlertDismissed,
+} from "./lib/dismissals";
 import { applyThemeMode, readThemeMode } from "./lib/theme";
 import type { ThemeMode } from "./lib/theme";
 import type {
@@ -45,21 +51,43 @@ export function App() {
   const [applyingMissedRecurring, setApplyingMissedRecurring] = useState(false);
   const [syncInboxAlert, setSyncInboxAlert] = useState<string>("");
   const syncInboxBusyRef = useRef(false);
+  const refreshInFlightRef = useRef<Promise<void> | null>(null);
+  const refreshQueuedRef = useRef(false);
 
   const refresh = useCallback(async () => {
-    try {
-      const data = await bootstrapState();
-      setBootstrap(data);
-      setError("");
-    } catch (err) {
-      setError(String(err));
+    if (refreshInFlightRef.current) {
+      refreshQueuedRef.current = true;
+      await refreshInFlightRef.current;
+      return;
     }
+
+    do {
+      refreshQueuedRef.current = false;
+      refreshInFlightRef.current = (async () => {
+        try {
+          const data = await bootstrapState();
+          setBootstrap(data);
+          setError("");
+        } catch (err) {
+          setError(String(err));
+        }
+      })();
+      await refreshInFlightRef.current;
+      refreshInFlightRef.current = null;
+    } while (refreshQueuedRef.current);
+  }, []);
+
+  const showSyncInboxAlert = useCallback((message: string) => {
+    if (!message || isSyncAlertDismissed(message)) {
+      return;
+    }
+    setSyncInboxAlert(message);
   }, []);
 
   const loadMissedRecurring = useCallback(async () => {
     try {
       const missed = (await runStartupRecurringCheck()) as MissedRecurringOccurrence[];
-      setMissedRecurring(missed);
+      setMissedRecurring(filterDismissedMissedRecurring(missed));
     } catch {
       setMissedRecurring([]);
     }
@@ -75,7 +103,7 @@ export function App() {
         const result = await processSyncInbox();
         if (result.failed_files > 0) {
           if (showFailureAlert) {
-            setSyncInboxAlert(
+            showSyncInboxAlert(
               `Sync inbox moved ${result.failed_files} file(s) to the failed folder. Open Settings > Local sync to review the paths.`,
             );
           }
@@ -87,7 +115,7 @@ export function App() {
         }
       } catch {
         if (showFailureAlert) {
-          setSyncInboxAlert(
+          showSyncInboxAlert(
             "Automatic sync inbox scan failed. Open Settings > Local sync and run Scan inbox now.",
           );
         }
@@ -95,7 +123,7 @@ export function App() {
         syncInboxBusyRef.current = false;
       }
     },
-    [refresh],
+    [refresh, showSyncInboxAlert],
   );
 
   useEffect(() => {
@@ -148,7 +176,7 @@ export function App() {
           typeof event.payload?.message === "string"
             ? event.payload.message
             : "Sync attention is required. Open Settings > Local sync for details.";
-        setSyncInboxAlert(message);
+        showSyncInboxAlert(message);
         await refresh();
       });
     })();
@@ -157,7 +185,7 @@ export function App() {
       unlistenUpdated?.();
       unlistenAttention?.();
     };
-  }, [loadMissedRecurring, refresh]);
+  }, [loadMissedRecurring, refresh, showSyncInboxAlert]);
 
   const openGuidedCreate = useCallback(() => {
     setEditingEntry(null);
@@ -266,7 +294,10 @@ export function App() {
               <div className={styles.actions}>
                 <button
                   className={styles.ghost}
-                  onClick={() => setSyncInboxAlert("")}
+                  onClick={() => {
+                    dismissSyncAlert(syncInboxAlert);
+                    setSyncInboxAlert("");
+                  }}
                   type="button"
                 >
                   Dismiss
@@ -286,7 +317,10 @@ export function App() {
             busy={applyingMissedRecurring}
             missedRecurring={missedRecurring}
             onApply={handleApplyMissed}
-            onDismiss={() => setMissedRecurring([])}
+            onDismiss={() => {
+              dismissMissedRecurring(missedRecurring);
+              setMissedRecurring([]);
+            }}
           />
 
           {error ? (
