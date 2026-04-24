@@ -1698,9 +1698,7 @@ fn fetch_local_sync_state(conn: &Connection, state: &AppState) -> AppResult<Loca
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
 
-    let pending_operations = conn.query_row("SELECT COUNT(*) FROM sync_outbox", [], |row| {
-        row.get::<_, i64>(0)
-    })? as u32;
+    let pending_operations = sync_snapshot_item_count(&build_sync_snapshot(conn)?);
     let trusted_peers = fetch_sync_peer_summaries(conn)?;
     let last_sync_at_utc = conn
         .query_row(
@@ -2283,6 +2281,61 @@ fn snapshot_payload(conn: &Connection) -> AppResult<String> {
     Ok(serde_json::to_string_pretty(&payload)?)
 }
 
+fn default_app_settings(reference: NaiveDate) -> AppSettings {
+    AppSettings {
+        school_year_start_month: DEFAULT_SCHOOL_YEAR_START_MONTH,
+        planning_start_month_key: planning_start_month_key_from_legacy_month(
+            DEFAULT_SCHOOL_YEAR_START_MONTH,
+            reference,
+        ),
+        school_year_months: DEFAULT_SCHOOL_YEAR_MONTHS,
+        language: "EN".to_string(),
+        backup_retention: DEFAULT_BACKUP_RETENTION,
+        last_migration_version: CURRENT_MIGRATION_VERSION,
+    }
+}
+
+fn build_sync_snapshot(conn: &Connection) -> AppResult<SyncSnapshot> {
+    Ok(SyncSnapshot {
+        settings: Some(fetch_settings(conn)?),
+        accounts: fetch_accounts(conn)?,
+        ledger_entries: fetch_entries(conn)?,
+        recurring_rules: fetch_recurring_rules(conn)?,
+        monthly_caps: fetch_monthly_caps(conn)?,
+    })
+}
+
+fn app_settings_equal(left: &AppSettings, right: &AppSettings) -> bool {
+    left.school_year_start_month == right.school_year_start_month
+        && left.planning_start_month_key == right.planning_start_month_key
+        && left.school_year_months == right.school_year_months
+        && left.language == right.language
+        && left.backup_retention == right.backup_retention
+}
+
+fn sync_snapshot_item_count(snapshot: &SyncSnapshot) -> u32 {
+    let defaults = default_app_settings(today_local());
+    let settings_count = u32::from(
+        snapshot
+            .settings
+            .as_ref()
+            .is_some_and(|settings| !app_settings_equal(settings, &defaults)),
+    );
+    settings_count
+        + snapshot.accounts.len() as u32
+        + snapshot.ledger_entries.len() as u32
+        + snapshot.recurring_rules.len() as u32
+        + snapshot.monthly_caps.len() as u32
+}
+
+fn sync_packet_has_snapshot(snapshot: &SyncSnapshot) -> bool {
+    snapshot.settings.is_some()
+        || !snapshot.accounts.is_empty()
+        || !snapshot.ledger_entries.is_empty()
+        || !snapshot.recurring_rules.is_empty()
+        || !snapshot.monthly_caps.is_empty()
+}
+
 fn validate_restore_backup_path(env: &AppEnv, backup_path: &Path) -> AppResult<PathBuf> {
     if backup_path.extension().and_then(|ext| ext.to_str()) != Some("db") {
         return Err(anyhow!("Only .db backup files can be restored."));
@@ -2531,6 +2584,103 @@ fn insert_account_dependency_if_missing(conn: &Connection, account: &Account) ->
     }
     insert_account_raw(conn, account)?;
     Ok(account.id.clone())
+}
+
+fn equivalent_account_id_from_accounts(
+    local_accounts: &[Account],
+    remote: &Account,
+) -> Option<String> {
+    let remote_key = account_match_key(remote);
+    let matches = local_accounts
+        .iter()
+        .filter(|account| account.id != remote.id && account_match_key(account) == remote_key)
+        .collect::<Vec<_>>();
+    if matches.len() == 1 {
+        Some(matches[0].id.clone())
+    } else {
+        None
+    }
+}
+
+fn default_like_setting_string(local: &str, default: &str) -> bool {
+    local.trim().eq_ignore_ascii_case(default.trim())
+}
+
+fn merge_missing_settings(
+    local: &AppSettings,
+    incoming: &AppSettings,
+    reference: NaiveDate,
+) -> AppResult<Option<AppSettings>> {
+    let incoming = normalize_app_settings(incoming.clone(), reference)?;
+    if local.school_year_start_month == incoming.school_year_start_month
+        && local.planning_start_month_key == incoming.planning_start_month_key
+        && local.school_year_months == incoming.school_year_months
+        && local.language == incoming.language
+        && local.backup_retention == incoming.backup_retention
+    {
+        return Ok(None);
+    }
+
+    let defaults = default_app_settings(reference);
+    let mut merged = local.clone();
+    let mut changed = false;
+
+    if local.planning_start_month_key == defaults.planning_start_month_key
+        && incoming.planning_start_month_key != local.planning_start_month_key
+    {
+        merged.planning_start_month_key = incoming.planning_start_month_key;
+        changed = true;
+    }
+    if local.school_year_months == defaults.school_year_months
+        && incoming.school_year_months != local.school_year_months
+    {
+        merged.school_year_months = incoming.school_year_months;
+        changed = true;
+    }
+    if default_like_setting_string(&local.language, &defaults.language)
+        && !default_like_setting_string(&incoming.language, &local.language)
+    {
+        merged.language = incoming.language;
+        changed = true;
+    }
+    if local.backup_retention == defaults.backup_retention
+        && incoming.backup_retention != local.backup_retention
+    {
+        merged.backup_retention = incoming.backup_retention;
+        changed = true;
+    }
+    if changed {
+        Ok(Some(normalize_app_settings(merged, reference)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn equivalent_rule_id_from_rules(
+    local_rules: &[RecurringRule],
+    incoming: &RecurringRule,
+) -> Option<String> {
+    let matches = local_rules
+        .iter()
+        .filter(|rule| rule.id != incoming.id && recurring_rule_content_equal(rule, incoming))
+        .collect::<Vec<_>>();
+    if matches.len() == 1 {
+        Some(matches[0].id.clone())
+    } else {
+        None
+    }
+}
+
+fn equivalent_cap_id_from_caps(local_caps: &[MonthlyCap], incoming: &MonthlyCap) -> Option<String> {
+    let matches = local_caps
+        .iter()
+        .filter(|cap| cap.id != incoming.id && monthly_cap_content_equal(cap, incoming))
+        .collect::<Vec<_>>();
+    if matches.len() == 1 {
+        Some(matches[0].id.clone())
+    } else {
+        None
+    }
 }
 
 fn delete_entry_raw(conn: &Connection, entry_id: &str) -> AppResult<()> {
@@ -4060,11 +4210,13 @@ fn import_json_internal(state: &AppState, path: &str) -> AppResult<()> {
 }
 
 fn build_sync_packet(conn: &Connection) -> AppResult<SyncPacket> {
+    let snapshot = build_sync_snapshot(conn)?;
     Ok(SyncPacket {
         app: SYNC_PACKET_APP_NAME.to_string(),
         schema_version: SYNC_PACKET_SCHEMA_VERSION,
         generated_at_utc: now_local_iso(),
         source: fetch_sync_device_identity(conn)?,
+        snapshot: snapshot.clone(),
         dependencies: SyncPacketDependencies {
             accounts: fetch_accounts(conn)?,
         },
@@ -4081,7 +4233,7 @@ fn export_sync_packet_internal(state: &AppState, path: &str) -> AppResult<SyncPa
 
     Ok(SyncPacketExportResult {
         path: path.to_string(),
-        operation_count: packet.operations.len() as u32,
+        operation_count: sync_snapshot_item_count(&packet.snapshot),
     })
 }
 
@@ -4108,46 +4260,192 @@ fn export_sync_packet_for_localsend_internal(
     })
 }
 
-fn import_sync_packet_value_internal(
+fn merge_sync_snapshot_into_live_data(
+    conn: &Connection,
+    snapshot: &SyncSnapshot,
+) -> AppResult<(u32, u32)> {
+    let reference = today_local();
+    let mut imported_items = 0u32;
+    let mut skipped_items = 0u32;
+
+    if let Some(incoming_settings) = &snapshot.settings {
+        let local_settings = fetch_settings(conn)?;
+        let normalized_incoming = normalize_app_settings(incoming_settings.clone(), reference)?;
+        if app_settings_equal(&local_settings, &normalized_incoming) {
+            // Identical settings are not counted as sync work.
+        } else if let Some(merged) =
+            merge_missing_settings(&local_settings, &normalized_incoming, reference)?
+        {
+            update_settings_row(conn, &merged)?;
+            imported_items += 1;
+        } else {
+            skipped_items += 1;
+        }
+    }
+
+    let mut local_accounts = fetch_accounts(conn)?;
+    let mut account_id_map = HashMap::new();
+    for incoming in &snapshot.accounts {
+        if local_accounts
+            .iter()
+            .any(|account| account.id == incoming.id)
+        {
+            account_id_map.insert(incoming.id.clone(), incoming.id.clone());
+            skipped_items += 1;
+            continue;
+        }
+        if let Some(local_id) = equivalent_account_id_from_accounts(&local_accounts, incoming) {
+            account_id_map.insert(incoming.id.clone(), local_id);
+            skipped_items += 1;
+            continue;
+        }
+        insert_account_raw(conn, incoming)?;
+        account_id_map.insert(incoming.id.clone(), incoming.id.clone());
+        local_accounts.push(incoming.clone());
+        imported_items += 1;
+    }
+
+    let mut local_rules = fetch_recurring_rules(conn)?;
+    let mut rule_id_map = HashMap::new();
+    for incoming in &snapshot.recurring_rules {
+        let mut mapped = incoming.clone();
+        mapped.account_id = mapped_account_id(&account_id_map, &mapped.account_id);
+        if local_accounts
+            .iter()
+            .all(|account| account.id != mapped.account_id)
+        {
+            skipped_items += 1;
+            continue;
+        }
+        if let Some(existing) = local_rules.iter().find(|rule| rule.id == mapped.id) {
+            rule_id_map.insert(incoming.id.clone(), existing.id.clone());
+            skipped_items += 1;
+            continue;
+        }
+        if let Some(local_id) = equivalent_rule_id_from_rules(&local_rules, &mapped) {
+            rule_id_map.insert(incoming.id.clone(), local_id);
+            skipped_items += 1;
+            continue;
+        }
+        insert_rule_raw(conn, &mapped)?;
+        rule_id_map.insert(incoming.id.clone(), mapped.id.clone());
+        local_rules.push(mapped);
+        imported_items += 1;
+    }
+
+    let mut local_caps = fetch_monthly_caps(conn)?;
+    for incoming in &snapshot.monthly_caps {
+        if local_caps.iter().any(|cap| cap.id == incoming.id) {
+            skipped_items += 1;
+            continue;
+        }
+        if equivalent_cap_id_from_caps(&local_caps, incoming).is_some() {
+            skipped_items += 1;
+            continue;
+        }
+        if local_caps
+            .iter()
+            .any(|cap| cap.category == incoming.category && cap.month_key == incoming.month_key)
+        {
+            skipped_items += 1;
+            continue;
+        }
+        insert_cap_raw(conn, incoming)?;
+        local_caps.push(incoming.clone());
+        imported_items += 1;
+    }
+
+    let mut local_entries = fetch_entries(conn)?;
+    for incoming in &snapshot.ledger_entries {
+        let mut mapped = incoming.clone();
+        mapped.account_id = mapped_account_id(&account_id_map, &mapped.account_id);
+        mapped.recurring_rule_id = mapped.recurring_rule_id.as_ref().map(|rule_id| {
+            rule_id_map
+                .get(rule_id)
+                .cloned()
+                .unwrap_or_else(|| rule_id.clone())
+        });
+        if local_accounts
+            .iter()
+            .all(|account| account.id != mapped.account_id)
+        {
+            skipped_items += 1;
+            continue;
+        }
+        if local_entries.iter().any(|entry| entry.id == mapped.id)
+            || local_entries
+                .iter()
+                .any(|entry| ledger_entry_content_equal(entry, &mapped))
+        {
+            skipped_items += 1;
+            continue;
+        }
+        insert_entry_raw(conn, &mapped)?;
+        local_entries.push(mapped);
+        imported_items += 1;
+    }
+
+    Ok((imported_items, skipped_items))
+}
+
+fn import_sync_snapshot_packet_internal(
     state: &AppState,
-    packet: SyncPacket,
+    packet: &SyncPacket,
 ) -> AppResult<SyncPacketImportResult> {
-    if packet.app != SYNC_PACKET_APP_NAME {
-        return Err(anyhow!(
-            "Unsupported sync packet source: expected {SYNC_PACKET_APP_NAME}."
-        ));
-    }
-    if packet.schema_version != SYNC_PACKET_SCHEMA_VERSION {
-        return Err(anyhow!(
-            "Unsupported sync packet schema version: {}.",
-            packet.schema_version
-        ));
-    }
-    if packet.source.device_id.trim().is_empty() {
-        return Err(anyhow!("Sync packet is missing a source device ID."));
-    }
-    if packet.source.device_name.trim().is_empty() {
-        return Err(anyhow!("Sync packet is missing a source device name."));
-    }
-    if packet
-        .operations
-        .iter()
-        .any(|operation| operation.device_id != packet.source.device_id)
-    {
-        return Err(anyhow!(
-            "Sync packet contains operations from more than one device."
-        ));
-    }
-
-    ensure_environment(state)?;
     let mut conn = open_connection(&state.env.db_path)?;
-    let local_identity = fetch_sync_device_identity(&conn)?;
-    if packet.source.device_id == local_identity.device_id {
-        return Err(anyhow!(
-            "This sync packet was exported by the current device and cannot be re-imported here."
-        ));
-    }
+    let previous = snapshot_payload(&conn)?;
 
+    let import_attempt = (|| -> AppResult<SyncPacketImportResult> {
+        let tx = conn.transaction()?;
+        let trusted_peer_added = upsert_sync_peer(&tx, &packet.source)?;
+        let (imported_operations, skipped_operations) =
+            merge_sync_snapshot_into_live_data(&tx, &packet.snapshot)?;
+
+        let synced_at = now_local_iso();
+        tx.execute(
+            "UPDATE sync_peers SET device_name = ?2, last_seen_at_utc = ?3 WHERE peer_device_id = ?1",
+            params![packet.source.device_id, packet.source.device_name, synced_at],
+        )?;
+        tx.execute(
+            "UPDATE sync_peer_state
+             SET last_sync_at_utc = ?2,
+                 last_error = ''
+             WHERE peer_device_id = ?1",
+            params![packet.source.device_id, synced_at],
+        )?;
+        tx.commit()?;
+
+        Ok(SyncPacketImportResult {
+            source_device_id: packet.source.device_id.clone(),
+            source_device_name: packet.source.device_name.clone(),
+            imported_operations,
+            skipped_operations,
+            trusted_peer_added,
+        })
+    })();
+
+    match import_attempt {
+        Ok(result) => {
+            if result.imported_operations > 0 {
+                push_undo(state, UndoAction::RestoreSnapshot { payload: previous });
+                let retention = fetch_settings(&conn)?.backup_retention;
+                let _ = backup_database(&state.env, retention)?;
+            }
+            Ok(result)
+        }
+        Err(err) => {
+            let _ = upsert_sync_peer(&conn, &packet.source);
+            let _ = set_sync_peer_last_error(&conn, &packet.source.device_id, &err.to_string());
+            Err(err)
+        }
+    }
+}
+
+fn import_sync_packet_operations_internal(
+    state: &AppState,
+    packet: &SyncPacket,
+) -> AppResult<SyncPacketImportResult> {
+    let mut conn = open_connection(&state.env.db_path)?;
     let last_received_seq: i64 = conn
         .query_row(
             "SELECT last_received_seq FROM sync_peer_state WHERE peer_device_id = ?1",
@@ -4260,6 +4558,54 @@ fn import_sync_packet_value_internal(
             Err(err)
         }
     }
+}
+
+fn import_sync_packet_value_internal(
+    state: &AppState,
+    packet: SyncPacket,
+) -> AppResult<SyncPacketImportResult> {
+    if packet.app != SYNC_PACKET_APP_NAME {
+        return Err(anyhow!(
+            "Unsupported sync packet source: expected {SYNC_PACKET_APP_NAME}."
+        ));
+    }
+    if packet.schema_version != SYNC_PACKET_SCHEMA_VERSION {
+        return Err(anyhow!(
+            "Unsupported sync packet schema version: {}.",
+            packet.schema_version
+        ));
+    }
+    if packet.source.device_id.trim().is_empty() {
+        return Err(anyhow!("Sync packet is missing a source device ID."));
+    }
+    if packet.source.device_name.trim().is_empty() {
+        return Err(anyhow!("Sync packet is missing a source device name."));
+    }
+    if packet
+        .operations
+        .iter()
+        .any(|operation| operation.device_id != packet.source.device_id)
+    {
+        return Err(anyhow!(
+            "Sync packet contains operations from more than one device."
+        ));
+    }
+
+    ensure_environment(state)?;
+    let conn = open_connection(&state.env.db_path)?;
+    let local_identity = fetch_sync_device_identity(&conn)?;
+    if packet.source.device_id == local_identity.device_id {
+        return Err(anyhow!(
+            "This sync packet was exported by the current device and cannot be re-imported here."
+        ));
+    }
+    drop(conn);
+
+    if sync_packet_has_snapshot(&packet.snapshot) {
+        return import_sync_snapshot_packet_internal(state, &packet);
+    }
+
+    import_sync_packet_operations_internal(state, &packet)
 }
 
 fn import_sync_packet_internal(state: &AppState, path: &str) -> AppResult<SyncPacketImportResult> {
@@ -4400,7 +4746,7 @@ fn sync_with_lan_peer_internal(
     ensure_environment(state)?;
     let conn = open_connection(&state.env.db_path)?;
     let packet = build_sync_packet(&conn)?;
-    let sent_operations = packet.operations.len() as u32;
+    let sent_operations = sync_snapshot_item_count(&packet.snapshot);
     let last_sent_seq = current_sync_outbox_max_seq(&conn)?;
     drop(conn);
 
@@ -5678,7 +6024,7 @@ mod tests {
     }
 
     #[test]
-    fn local_sync_state_bootstraps_device_and_counts_pending_operations() {
+    fn local_sync_state_uses_live_snapshot_items_instead_of_outbox_entries() {
         let base_dir = temp_test_dir("sbt_local_sync_state");
         let state = make_test_state(&base_dir);
         fs::create_dir_all(sync_inbox_dir(&state.env)).unwrap();
@@ -5702,7 +6048,7 @@ mod tests {
         .unwrap();
 
         let updated = fetch_local_sync_state(&conn, &state).unwrap();
-        assert_eq!(updated.pending_operations, 1);
+        assert_eq!(updated.pending_operations, 0);
 
         let _ = fs::remove_dir_all(base_dir);
     }
@@ -5767,6 +6113,8 @@ mod tests {
         assert_eq!(result.operation_count, 1);
         assert_eq!(packet.app, SYNC_PACKET_APP_NAME);
         assert_eq!(packet.schema_version, SYNC_PACKET_SCHEMA_VERSION);
+        assert_eq!(packet.snapshot.accounts.len(), 1);
+        assert_eq!(packet.snapshot.accounts[0].id, "sync-account");
         assert_eq!(packet.dependencies.accounts.len(), 1);
         assert_eq!(packet.dependencies.accounts[0].id, "sync-account");
         assert_eq!(packet.operations.len(), 1);
@@ -5820,8 +6168,8 @@ mod tests {
 
         let first =
             import_sync_packet_internal(&target_state, &packet_path.to_string_lossy()).unwrap();
-        assert_eq!(first.imported_operations, 1);
-        assert_eq!(first.skipped_operations, 1);
+        assert_eq!(first.imported_operations, 2);
+        assert_eq!(first.skipped_operations, 0);
         assert!(first.trusted_peer_added);
 
         let target_conn = open_connection(&target_state.env.db_path).unwrap();
@@ -5892,7 +6240,7 @@ mod tests {
 
         let result =
             import_sync_packet_internal(&target_state, &packet_path.to_string_lossy()).unwrap();
-        assert_eq!(result.imported_operations, 1);
+        assert_eq!(result.imported_operations, 2);
 
         let target_conn = open_connection(&target_state.env.db_path).unwrap();
         let accounts = fetch_accounts(&target_conn).unwrap();
@@ -6137,8 +6485,8 @@ mod tests {
         assert_eq!(result.scanned_files, 1);
         assert_eq!(result.processed_files, 1);
         assert_eq!(result.failed_files, 0);
-        assert_eq!(result.imported_operations, 0);
-        assert_eq!(result.skipped_operations, 1);
+        assert_eq!(result.imported_operations, 1);
+        assert_eq!(result.skipped_operations, 0);
         assert_eq!(
             list_sync_packet_files(&sync_inbox_dir(&target_state.env))
                 .unwrap()

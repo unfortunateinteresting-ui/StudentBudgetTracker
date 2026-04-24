@@ -228,12 +228,27 @@ pub struct SyncPacketDependencies {
     pub accounts: Vec<Account>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SyncSnapshot {
+    pub settings: Option<AppSettings>,
+    #[serde(default)]
+    pub accounts: Vec<Account>,
+    #[serde(default)]
+    pub ledger_entries: Vec<LedgerEntry>,
+    #[serde(default)]
+    pub recurring_rules: Vec<RecurringRule>,
+    #[serde(default)]
+    pub monthly_caps: Vec<MonthlyCap>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncPacket {
     pub app: String,
     pub schema_version: u32,
     pub generated_at_utc: String,
     pub source: SyncDeviceIdentity,
+    #[serde(default)]
+    pub snapshot: SyncSnapshot,
     #[serde(default)]
     pub dependencies: SyncPacketDependencies,
     pub operations: Vec<SyncOperationRecord>,

@@ -373,7 +373,7 @@ describe("SettingsPage", () => {
     expect(onRefresh).toHaveBeenCalled();
     expect(
       screen.getByText(
-        /Exported 3 sync operations, opened LocalSend, and revealed/i,
+        /Exported 3 sync items, opened LocalSend, and revealed/i,
       ),
     ).toBeInTheDocument();
   });
@@ -460,7 +460,7 @@ describe("SettingsPage", () => {
       );
     });
     expect(
-      screen.getByText("Exported 3 sync operations to C:\\Sync\\student-budget-sync.json."),
+      screen.getByText("Exported 3 sync items to C:\\Sync\\student-budget-sync.json."),
     ).toBeInTheDocument();
   });
 
@@ -495,7 +495,7 @@ describe("SettingsPage", () => {
       expect(api.importSyncPacket).toHaveBeenCalledWith("C:\\Sync\\incoming-sync.json");
     });
     expect(onRefresh).toHaveBeenCalled();
-    expect(screen.getByText("Imported 2 sync operations from Dorm desktop.")).toBeInTheDocument();
+    expect(screen.getByText("Imported 2 sync items from Dorm desktop.")).toBeInTheDocument();
   });
 
   it("auto-discovers LAN peers and shows send actions for them", async () => {
@@ -574,7 +574,7 @@ describe("SettingsPage", () => {
     expect(onRefresh).toHaveBeenCalled();
     expect(
       screen.getByText(
-        "Synced with Dorm desktop. Sent 3 queued operations; peer imported 2. This device imported 1.",
+        "Synced with Dorm desktop. Sent 3 sync items; peer imported 2. This device imported 1.",
       ),
     ).toBeInTheDocument();
   });

@@ -213,7 +213,7 @@ export function SettingsPage({
       const result = await exportSyncPacket(syncExportPath.trim());
       setNotice({
         kind: "success",
-        text: `Exported ${result.operation_count} sync operations to ${result.path}.`,
+        text: `Exported ${result.operation_count} sync items to ${result.path}.`,
       });
     } catch (error) {
       setNotice({ kind: "error", text: String(error) });
@@ -228,7 +228,7 @@ export function SettingsPage({
       const result = await importSyncPacket(syncImportPath.trim());
       setNotice({
         kind: "success",
-        text: `Imported ${result.imported_operations} sync operations from ${result.source_device_name}.`,
+        text: `Imported ${result.imported_operations} sync items from ${result.source_device_name}.`,
       });
       await onRefresh();
     } catch (error) {
@@ -244,7 +244,7 @@ export function SettingsPage({
       const result = await exportSyncPacketForLocalSend();
       setNotice({
         kind: "success",
-        text: `Exported ${result.operation_count} sync operations, opened LocalSend, and revealed ${result.path}.`,
+        text: `Exported ${result.operation_count} sync items, opened LocalSend, and revealed ${result.path}.`,
       });
       await onRefresh();
     } catch (error) {
@@ -295,7 +295,7 @@ export function SettingsPage({
       const result = await syncWithLanPeer({ address, port });
       setNotice({
         kind: "success",
-        text: `Synced with ${result.peer_device_name}. Sent ${result.sent_operations} queued operations; peer imported ${result.peer_imported_operations}. This device imported ${result.local_imported_operations}.`,
+        text: `Synced with ${result.peer_device_name}. Sent ${result.sent_operations} sync items; peer imported ${result.peer_imported_operations}. This device imported ${result.local_imported_operations}.`,
       });
       await onRefresh();
       await refreshLanPeers(true);
@@ -553,7 +553,7 @@ export function SettingsPage({
                 </span>
               </div>
               <div className={styles.summaryRow}>
-                <span>Queued local operations</span>
+                <span>Local sync items</span>
                 <span className={styles.inlineValue}>{localSync.pending_operations}</span>
               </div>
               <div className={styles.summaryRow}>
