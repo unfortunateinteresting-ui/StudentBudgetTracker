@@ -35,16 +35,21 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
   const topCategory = [...snapshot.category_spend_this_month].sort((left, right) => {
     return right.value - left.value;
   })[0];
+  const monthlySpendBars = useMemo(
+    () =>
+      snapshot.monthly_spending_totals.map((point) => ({
+        ...point,
+        label: monthLabel(point.label),
+      })),
+    [snapshot.monthly_spending_totals],
+  );
 
   return (
     <div className={styles.page}>
       <div className={styles.hero}>
         <div>
           <p className={styles.kicker}>Insights</p>
-          <h1 className={styles.heroTitle}>Charts and totals</h1>
-          <p className={styles.heroText}>
-            Charts, cards, and tables use the same saved snapshot so the numbers stay consistent.
-          </p>
+          <h1 className={styles.heroTitle}>Spending and plan totals</h1>
         </div>
       </div>
 
@@ -72,6 +77,30 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
         />
       </div>
 
+      <div className={styles.grid3}>
+        <MetricCard
+          eyebrow="School year"
+          note={`Average ${currency(snapshot.average_monthly_spend)} per elapsed month.`}
+          onWhy={() => onWhy("spending_to_date")}
+          title="Spending to date"
+          value={currency(snapshot.spending_to_date)}
+        />
+        <MetricCard
+          eyebrow="Plan"
+          note={`Remaining planned spend ${currency(snapshot.planned_remaining_spending)}.`}
+          onWhy={() => onWhy("planned_total_spending")}
+          title="Planned total spending"
+          value={currency(snapshot.planned_total_spending)}
+        />
+        <MetricCard
+          eyebrow="Prediction"
+          note={`Remaining predicted spend ${currency(snapshot.predicted_remaining_spending)}.`}
+          onWhy={() => onWhy("predicted_total_spending")}
+          title="Predicted total spending"
+          value={currency(snapshot.predicted_total_spending)}
+        />
+      </div>
+
       <div className={styles.grid2}>
         <MetricCard
           eyebrow="Planning"
@@ -95,6 +124,15 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
           title="Monthly spending, cap, and end balance"
         >
           <LineChart data={snapshot.monthly_series} />
+        </SectionCard>
+        <SectionCard eyebrow="School year" title="Spending by month">
+          <BarChart color="var(--color-forest)" data={monthlySpendBars} />
+        </SectionCard>
+      </div>
+
+      <div className={styles.grid2}>
+        <SectionCard eyebrow="School year" title="Average spend by category">
+          <BarChart data={snapshot.category_average_spend} />
         </SectionCard>
         <SectionCard eyebrow="This month" title="Category totals this month">
           <BarChart data={snapshot.category_spend_this_month} />
@@ -152,6 +190,14 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
             <div className={styles.summaryRow}>
               <span>Over-cap months</span>
               <span className={styles.inlineValue}>{overCapMonths.length}</span>
+            </div>
+            <div className={styles.summaryRow}>
+              <span>Spending to date</span>
+              <span className={styles.inlineValue}>{currency(snapshot.spending_to_date)}</span>
+            </div>
+            <div className={styles.summaryRow}>
+              <span>Average monthly spend</span>
+              <span className={styles.inlineValue}>{currency(snapshot.average_monthly_spend)}</span>
             </div>
             <div className={styles.summaryRow}>
               <span>Largest current category</span>

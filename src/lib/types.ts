@@ -107,6 +107,12 @@ export interface InsightSnapshot {
   total_available_cash: number;
   this_month_spend: number;
   this_month_cap: number;
+  spending_to_date: number;
+  average_monthly_spend: number;
+  planned_remaining_spending: number;
+  predicted_remaining_spending: number;
+  planned_total_spending: number;
+  predicted_total_spending: number;
   school_year_runway_remaining: number;
   projected_end_of_year_cushion: number;
   rent_due_this_month: number;
@@ -117,6 +123,8 @@ export interface InsightSnapshot {
   recent_activity: LedgerEntry[];
   account_balances: ChartPoint[];
   category_spend_this_month: ChartPoint[];
+  category_average_spend: ChartPoint[];
+  monthly_spending_totals: ChartPoint[];
   monthly_series: MonthlySeriesPoint[];
   activity_groups: ActivityGroup[];
   breakdowns: Record<string, string[]>;

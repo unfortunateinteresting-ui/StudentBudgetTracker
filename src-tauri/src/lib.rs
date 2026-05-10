@@ -3185,6 +3185,7 @@ fn calculate_snapshot_with_query(
         .map(|month| parse_month_start(month).map(end_of_month))
         .transpose()?
         .unwrap_or(query.reference_date);
+    let remaining_window_start = query.reference_date.max(today_local());
     let current_month = current_month_key();
     let current_month_start = parse_month_start(&current_month)?;
     let current_month_spend = filtered_entries
@@ -3197,6 +3198,67 @@ fn calculate_snapshot_with_query(
         .map(|entry| entry.amount.abs())
         .sum::<f64>();
 
+    let spending_to_date = range_entries
+        .iter()
+        .filter(|entry| {
+            entry.entry_kind == EntryKind::Expense
+                && !entry.exclude_from_insights
+                && (matches!(&query.range, InsightRangeSpec::Month(_))
+                    || parse_date(&entry.occurred_at_local)
+                        .map(|date| date <= query.reference_date)
+                        .unwrap_or(false))
+        })
+        .map(|entry| entry.amount.abs())
+        .sum::<f64>();
+    let elapsed_month_count = query
+        .range_months
+        .iter()
+        .filter(|month| month.as_str() <= current_month.as_str())
+        .count()
+        .max(1) as f64;
+    let average_monthly_spend = spending_to_date / elapsed_month_count;
+    let future_month_count = query
+        .range_months
+        .iter()
+        .filter(|month| month.as_str() > current_month.as_str())
+        .count() as f64;
+    let is_variable_expense = |entry: &LedgerEntry| {
+        entry.entry_kind == EntryKind::Expense
+            && !entry.exclude_from_insights
+            && entry.recurring_rule_id.is_none()
+            && !is_rent_like(&format!(
+                "{} {} {}",
+                entry.label, entry.category, entry.notes
+            ))
+    };
+    let variable_spending_to_date = range_entries
+        .iter()
+        .filter(|entry| {
+            is_variable_expense(entry)
+                && (matches!(&query.range, InsightRangeSpec::Month(_))
+                    || parse_date(&entry.occurred_at_local)
+                        .map(|date| date <= query.reference_date)
+                        .unwrap_or(false))
+        })
+        .map(|entry| entry.amount.abs())
+        .sum::<f64>();
+    let average_variable_spend = variable_spending_to_date / elapsed_month_count;
+    let current_variable_spend = filtered_entries
+        .iter()
+        .filter(|entry| {
+            is_variable_expense(entry)
+                && month_key(&entry.occurred_at_local) == Some(current_month.as_str())
+        })
+        .map(|entry| entry.amount.abs())
+        .sum::<f64>();
+    let current_variable_remaining = if range_month_set.contains(&current_month) {
+        (average_variable_spend - current_variable_spend).max(0.0)
+    } else {
+        0.0
+    };
+    let predicted_variable_remaining =
+        current_variable_remaining + average_variable_spend * future_month_count;
+
     let remaining_fixed_bills = active_rules
         .iter()
         .filter(|rule| {
@@ -3204,7 +3266,7 @@ fn calculate_snapshot_with_query(
         })
         .map(|rule| {
             let future_dates =
-                scheduled_dates(rule, query.reference_date, range_end).unwrap_or_default();
+                scheduled_dates(rule, remaining_window_start, range_end).unwrap_or_default();
             future_dates.len() as f64 * rule.amount
         })
         .sum::<f64>();
@@ -3228,9 +3290,12 @@ fn calculate_snapshot_with_query(
         })
         .sum::<f64>();
 
+    let planned_remaining_spending = remaining_fixed_bills + remaining_caps;
+    let predicted_remaining_spending = remaining_fixed_bills + predicted_variable_remaining;
+    let planned_total_spending = spending_to_date + planned_remaining_spending;
+    let predicted_total_spending = spending_to_date + predicted_remaining_spending;
     let school_year_runway_remaining = total_available_cash - remaining_fixed_bills;
-    let projected_end_of_year_cushion =
-        total_available_cash - remaining_fixed_bills - remaining_caps;
+    let projected_end_of_year_cushion = total_available_cash - planned_remaining_spending;
 
     let focus_month_start = parse_month_start(&query.focus_month)?;
     let focus_month_end = end_of_month(focus_month_start);
@@ -3316,6 +3381,53 @@ fn calculate_snapshot_with_query(
             .partial_cmp(&left.value)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+
+    let mut category_average_map: HashMap<String, f64> = HashMap::new();
+    for entry in range_entries.iter().filter(|entry| {
+        entry.entry_kind == EntryKind::Expense
+            && !entry.exclude_from_insights
+            && (matches!(&query.range, InsightRangeSpec::Month(_))
+                || parse_date(&entry.occurred_at_local)
+                    .map(|date| date <= query.reference_date)
+                    .unwrap_or(false))
+    }) {
+        *category_average_map
+            .entry(entry.category.clone())
+            .or_insert(0.0) += entry.amount.abs();
+    }
+    let mut category_average_spend: Vec<ChartPoint> = category_average_map
+        .into_iter()
+        .map(|(label, value)| ChartPoint {
+            label,
+            value: value / elapsed_month_count,
+        })
+        .collect();
+    category_average_spend.sort_by(|left, right| {
+        right
+            .value
+            .partial_cmp(&left.value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let monthly_spending_totals = query
+        .range_months
+        .iter()
+        .map(|month| {
+            let value = filtered_entries
+                .iter()
+                .filter(|entry| {
+                    entry.entry_kind == EntryKind::Expense
+                        && !entry.exclude_from_insights
+                        && month_key(&entry.occurred_at_local) == Some(month.as_str())
+                })
+                .map(|entry| entry.amount.abs())
+                .sum::<f64>();
+            ChartPoint {
+                label: month.clone(),
+                value,
+            }
+        })
+        .collect::<Vec<_>>();
 
     let recent_activity = range_entries.iter().take(8).cloned().collect::<Vec<_>>();
     let account_balances = active_accounts
@@ -3459,6 +3571,52 @@ fn calculate_snapshot_with_query(
         ]),
     );
     breakdowns.insert(
+        "spending_to_date".to_string(),
+        build_lines(vec![
+            format!(
+                "Spending to date in the selected range = {}",
+                spending_to_date
+            ),
+            format!("Elapsed months used for averages = {}", elapsed_month_count),
+            format!("Average monthly spend = {}", average_monthly_spend),
+            "Only expense entries included in insights are counted.".to_string(),
+        ]),
+    );
+    breakdowns.insert(
+        "planned_total_spending".to_string(),
+        build_lines(vec![
+            format!("Spending to date = {}", spending_to_date),
+            format!("Remaining fixed bills = {}", remaining_fixed_bills),
+            format!("Remaining monthly caps = {}", remaining_caps),
+            format!(
+                "Planned remaining spending = {}",
+                planned_remaining_spending
+            ),
+            format!("Planned total spending = {}", planned_total_spending),
+        ]),
+    );
+    breakdowns.insert(
+        "predicted_total_spending".to_string(),
+        build_lines(vec![
+            format!("Spending to date = {}", spending_to_date),
+            format!("Remaining fixed bills = {}", remaining_fixed_bills),
+            format!(
+                "Average variable spend per month = {}",
+                average_variable_spend
+            ),
+            format!("Current variable spend = {}", current_variable_spend),
+            format!(
+                "Predicted variable remaining = {}",
+                predicted_variable_remaining
+            ),
+            format!(
+                "Predicted remaining spending = {}",
+                predicted_remaining_spending
+            ),
+            format!("Predicted total spending = {}", predicted_total_spending),
+        ]),
+    );
+    breakdowns.insert(
         "school_year_runway_remaining".to_string(),
         build_lines(vec![
             format!("Total available cash = {}", total_available_cash),
@@ -3494,6 +3652,12 @@ fn calculate_snapshot_with_query(
         total_available_cash,
         this_month_spend,
         this_month_cap,
+        spending_to_date,
+        average_monthly_spend,
+        planned_remaining_spending,
+        predicted_remaining_spending,
+        planned_total_spending,
+        predicted_total_spending,
         school_year_runway_remaining,
         projected_end_of_year_cushion,
         rent_due_this_month,
@@ -3504,6 +3668,8 @@ fn calculate_snapshot_with_query(
         recent_activity,
         account_balances,
         category_spend_this_month,
+        category_average_spend,
+        monthly_spending_totals,
         monthly_series,
         activity_groups,
         breakdowns,
@@ -3636,6 +3802,9 @@ fn breakdown_title(metric_id: &str) -> String {
     match metric_id {
         "total_available_cash" => "Total available cash".to_string(),
         "this_month_spend" => "This month spend".to_string(),
+        "spending_to_date" => "Spending to date".to_string(),
+        "planned_total_spending" => "Planned total spending".to_string(),
+        "predicted_total_spending" => "Predicted total spending".to_string(),
         "school_year_runway_remaining" => "Planning window balance".to_string(),
         "projected_end_of_year_cushion" => "Projected end balance".to_string(),
         "rent_net_this_month" => "Rent net this month".to_string(),
@@ -7082,6 +7251,19 @@ mod tests {
         assert_eq!(snapshot.monthly_series[0].runway_balance, 950.0);
         assert_eq!(snapshot.monthly_series[1].month_key, current_month);
         assert_eq!(snapshot.monthly_series[1].runway_balance, 800.0);
+        assert_eq!(snapshot.spending_to_date, 150.0);
+        assert_eq!(snapshot.average_monthly_spend, 75.0);
+        assert_eq!(snapshot.planned_remaining_spending, 50.0);
+        assert_eq!(snapshot.planned_total_spending, 200.0);
+        assert_eq!(snapshot.predicted_remaining_spending, 0.0);
+        assert_eq!(snapshot.predicted_total_spending, 150.0);
+        assert_eq!(snapshot.monthly_spending_totals.len(), 2);
+        assert_eq!(snapshot.monthly_spending_totals[0].value, 50.0);
+        assert_eq!(snapshot.monthly_spending_totals[1].value, 100.0);
+        assert_eq!(snapshot.category_average_spend[0].label, "food");
+        assert_eq!(snapshot.category_average_spend[0].value, 50.0);
+        assert_eq!(snapshot.category_average_spend[1].label, "school");
+        assert_eq!(snapshot.category_average_spend[1].value, 25.0);
     }
 
     #[test]

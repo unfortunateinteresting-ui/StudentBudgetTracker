@@ -85,6 +85,12 @@ const snapshot: InsightSnapshot = {
   total_available_cash: 1325,
   this_month_spend: 200,
   this_month_cap: 250,
+  spending_to_date: 240,
+  average_monthly_spend: 120,
+  planned_remaining_spending: 400,
+  predicted_remaining_spending: 360,
+  planned_total_spending: 640,
+  predicted_total_spending: 600,
   school_year_runway_remaining: 900,
   projected_end_of_year_cushion: 300,
   rent_due_this_month: 1200,
@@ -95,6 +101,8 @@ const snapshot: InsightSnapshot = {
   recent_activity: [],
   account_balances: [],
   category_spend_this_month: [],
+  category_average_spend: [],
+  monthly_spending_totals: [],
   monthly_series: [
     {
       month_key: "2026-11",

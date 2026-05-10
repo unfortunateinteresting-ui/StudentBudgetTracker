@@ -4,7 +4,7 @@ import { BarChart } from "../components/BarChart";
 import { MetricCard } from "../components/MetricCard";
 import { QuickAddBar } from "../components/QuickAddBar";
 import { SectionCard } from "../components/SectionCard";
-import { compactDate, currency } from "../lib/format";
+import { compactDate, currency, monthLabel } from "../lib/format";
 import type { Account, InsightSnapshot, LedgerEntry, MonthlyCap, RecurringRule } from "../lib/types";
 import styles from "./Page.module.css";
 
@@ -31,6 +31,14 @@ export function HomePage({
     () => new Map(accounts.map((account) => [account.id, account.name])),
     [accounts],
   );
+  const monthlySpendBars = useMemo(
+    () =>
+      snapshot.monthly_spending_totals.map((point) => ({
+        ...point,
+        label: monthLabel(point.label),
+      })),
+    [snapshot.monthly_spending_totals],
+  );
 
   return (
     <div className={styles.page}>
@@ -38,10 +46,6 @@ export function HomePage({
         <div>
           <p className={styles.kicker}>Overview</p>
           <h1 className={styles.heroTitle}>Budget overview</h1>
-          <p className={styles.heroText}>
-            Review available cash, this month&apos;s spending, rent totals, and upcoming bills in
-            one place.
-          </p>
         </div>
       </div>
 
@@ -81,6 +85,30 @@ export function HomePage({
           onWhy={() => onWhy("projected_end_of_year_cushion")}
           title="Projected end balance"
           value={currency(snapshot.projected_end_of_year_cushion)}
+        />
+      </div>
+
+      <div className={styles.grid3}>
+        <MetricCard
+          eyebrow="School year"
+          note={`Average ${currency(snapshot.average_monthly_spend)} per elapsed month.`}
+          onWhy={() => onWhy("spending_to_date")}
+          title="Spending to date"
+          value={currency(snapshot.spending_to_date)}
+        />
+        <MetricCard
+          eyebrow="Plan"
+          note={`Remaining planned spend ${currency(snapshot.planned_remaining_spending)}.`}
+          onWhy={() => onWhy("planned_total_spending")}
+          title="Planned total spending"
+          value={currency(snapshot.planned_total_spending)}
+        />
+        <MetricCard
+          eyebrow="Prediction"
+          note={`Remaining predicted spend ${currency(snapshot.predicted_remaining_spending)}.`}
+          onWhy={() => onWhy("predicted_total_spending")}
+          title="Predicted total spending"
+          value={currency(snapshot.predicted_total_spending)}
         />
       </div>
 
@@ -136,6 +164,15 @@ export function HomePage({
               ))}
             </tbody>
           </table>
+        </SectionCard>
+      </div>
+
+      <div className={styles.grid2}>
+        <SectionCard eyebrow="School year" title="Spending by month">
+          <BarChart color="var(--color-forest)" data={monthlySpendBars} />
+        </SectionCard>
+        <SectionCard eyebrow="School year" title="Average spend by category">
+          <BarChart data={snapshot.category_average_spend} />
         </SectionCard>
       </div>
 
