@@ -85,11 +85,25 @@ describe("QuickAddBar", () => {
             transfer_group_id: null,
             exclude_from_insights: false,
           },
+          {
+            id: "entry-2",
+            account_id: "active-1",
+            entry_kind: "funding",
+            amount: 500,
+            occurred_at_local: "2026-04-23T10:00:00",
+            label: "Scholarship",
+            category: "income",
+            notes: "",
+            recurring_rule_id: null,
+            transfer_group_id: null,
+            exclude_from_insights: false,
+          },
         ]}
         onSaved={vi.fn().mockResolvedValue(undefined)}
       />,
     );
 
+    expect(screen.queryByRole("option", { name: "income" })).not.toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText("Quick add category"), "transport");
     await user.type(screen.getByLabelText("Quick add expense"), "9 bus pass");
     await user.click(screen.getByRole("button", { name: "Add expense" }));

@@ -1,6 +1,6 @@
-import type { LedgerEntry, MonthlyCap, RecurringRule } from "./types";
+import type { EntryKind, LedgerEntry, MonthlyCap, RecurringRule } from "./types";
 
-export const STARTER_CATEGORIES = [
+export const SPENDING_CATEGORIES = [
   "rent",
   "food",
   "groceries",
@@ -12,6 +12,10 @@ export const STARTER_CATEGORIES = [
   "utilities",
   "misc",
 ];
+
+export const FUNDING_CATEGORIES = ["income", "other funding", "financial aid", "guarantor"];
+
+export const STARTER_CATEGORIES = [...SPENDING_CATEGORIES, ...FUNDING_CATEGORIES, "adjustment"];
 
 const cleanOption = (value: string) => value.trim();
 
@@ -25,12 +29,29 @@ export function categoryOptions(
   entries: LedgerEntry[] = [],
   recurringRules: RecurringRule[] = [],
   monthlyCaps: MonthlyCap[] = [],
+  entryKind?: Exclude<EntryKind, "transfer">,
 ) {
+  const starterCategories =
+    entryKind === "funding"
+      ? FUNDING_CATEGORIES
+      : entryKind === "rent_credit"
+        ? ["rent"]
+        : entryKind === "adjustment"
+          ? ["adjustment"]
+          : SPENDING_CATEGORIES;
+  const matchingEntries = entryKind
+    ? entries.filter((entry) => entry.entry_kind === entryKind)
+    : entries;
+  const matchingRules = entryKind
+    ? recurringRules.filter((rule) => rule.entry_kind === entryKind)
+    : recurringRules;
+  const capCategories = !entryKind || entryKind === "expense" ? monthlyCaps : [];
+
   return uniqueOptions([
-    ...STARTER_CATEGORIES,
-    ...entries.map((entry) => entry.category),
-    ...recurringRules.map((rule) => rule.category),
-    ...monthlyCaps.map((cap) => cap.category),
+    ...starterCategories,
+    ...matchingEntries.map((entry) => entry.category),
+    ...matchingRules.map((rule) => rule.category),
+    ...capCategories.map((cap) => cap.category),
   ]);
 }
 

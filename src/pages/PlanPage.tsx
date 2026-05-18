@@ -9,6 +9,8 @@ import {
   updateRecurringRule,
 } from "../lib/api";
 import { currentMonthKey, currency, monthLabel, shiftMonthKey } from "../lib/format";
+import { netSpendingByCategory } from "../lib/spending";
+import { categoryOptions } from "../lib/suggestions";
 import type {
   Account,
   AppSettings,
@@ -82,6 +84,13 @@ const emptyCapForm = (): CapFormState => ({
   month_key: currentMonthKey(),
 });
 
+const defaultCategoryForKind = (kind: Exclude<EntryKind, "transfer">) => {
+  if (kind === "funding") return "income";
+  if (kind === "rent_credit") return "rent";
+  if (kind === "adjustment") return "adjustment";
+  return "rent";
+};
+
 export function PlanPage({
   accounts,
   recurringRules,
@@ -129,6 +138,11 @@ export function PlanPage({
     }
     return options;
   }, [accounts, activeAccounts, editingRuleId, rule.account_id]);
+
+  const ruleCategoryChoices = useMemo(
+    () => categoryOptions([], recurringRules, monthlyCaps, rule.entry_kind),
+    [monthlyCaps, recurringRules, rule.entry_kind],
+  );
 
   const sortedRules = useMemo(
     () =>
@@ -186,15 +200,8 @@ export function PlanPage({
   );
 
   const visibleMonthSpendByCategory = useMemo(() => {
-    const categoryMap = new Map<string, number>();
     const monthEntries = activityByMonth.get(visibleCapMonth)?.entries ?? [];
-    monthEntries.forEach((entry) => {
-      if (entry.entry_kind !== "expense" || entry.exclude_from_insights) {
-        return;
-      }
-      categoryMap.set(entry.category, (categoryMap.get(entry.category) ?? 0) + entry.amount);
-    });
-    return categoryMap;
+    return netSpendingByCategory(monthEntries);
   }, [activityByMonth, visibleCapMonth]);
 
   const visibleMonthCapTotal = useMemo(
@@ -568,12 +575,16 @@ export function PlanPage({
             />
             <select
               className={styles.select}
-              onChange={(event) =>
+              onChange={(event) => {
+                const entryKind = event.target.value as Exclude<EntryKind, "transfer">;
                 setRule({
                   ...rule,
-                  entry_kind: event.target.value as Exclude<EntryKind, "transfer">,
-                })
-              }
+                  entry_kind: entryKind,
+                  category: ["rent", "income", "adjustment", ""].includes(rule.category)
+                    ? defaultCategoryForKind(entryKind)
+                    : rule.category,
+                });
+              }}
               value={rule.entry_kind}
             >
               <option value="expense">expense</option>
@@ -606,10 +617,16 @@ export function PlanPage({
           <div className={styles.filters}>
             <input
               className={styles.input}
+              list="recurring-category-options"
               onChange={(event) => setRule({ ...rule, category: event.target.value })}
               placeholder="Category"
               value={rule.category}
             />
+            <datalist id="recurring-category-options">
+              {ruleCategoryChoices.map((item) => (
+                <option key={item} value={item} />
+              ))}
+            </datalist>
             <input
               className={styles.input}
               onChange={(event) => setRule({ ...rule, amount: event.target.value })}

@@ -26,7 +26,7 @@ export function QuickAddBar({
     [accounts],
   );
   const categories = useMemo(
-    () => categoryOptions(entries, recurringRules, monthlyCaps),
+    () => categoryOptions(entries, recurringRules, monthlyCaps, "expense"),
     [entries, monthlyCaps, recurringRules],
   );
   const [value, setValue] = useState("");

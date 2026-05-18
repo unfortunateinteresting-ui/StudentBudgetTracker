@@ -68,7 +68,20 @@ const entries = [
     notes: "",
     recurring_rule_id: null,
     transfer_group_id: null,
-    exclude_from_insights: true,
+    exclude_from_insights: false,
+  },
+  {
+    id: "entry-5",
+    account_id: "account-1",
+    entry_kind: "expense" as const,
+    amount: 600,
+    occurred_at_local: "2026-11-01T10:00:00",
+    label: "Rent",
+    category: "rent",
+    notes: "",
+    recurring_rule_id: null,
+    transfer_group_id: null,
+    exclude_from_insights: false,
   },
   {
     id: "entry-4",
@@ -104,7 +117,8 @@ describe("ActivityPage", () => {
       />,
     );
 
-    expect(screen.getByText("Expense $42.00")).toBeInTheDocument();
+    expect(screen.getByText("Net spend $492.00")).toBeInTheDocument();
+    expect(screen.getByText("Expense $642.00")).toBeInTheDocument();
     expect(screen.getByText("Funding $500.00")).toBeInTheDocument();
     expect(screen.getByText("Rent credit $150.00")).toBeInTheDocument();
     expect(screen.getByText("Adjustment -$20.00")).toBeInTheDocument();

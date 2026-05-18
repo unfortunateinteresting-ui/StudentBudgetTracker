@@ -1290,6 +1290,116 @@ fn is_rent_like(entry: &str) -> bool {
     text.contains("rent") || text.contains("loyer")
 }
 
+fn is_rent_expense(entry: &LedgerEntry) -> bool {
+    entry.entry_kind == EntryKind::Expense
+        && is_rent_like(&format!(
+            "{} {} {}",
+            entry.label, entry.category, entry.notes
+        ))
+}
+
+fn counts_in_insights(entry: &LedgerEntry) -> bool {
+    !entry.exclude_from_insights
+}
+
+fn entry_counts_to_date(entry: &LedgerEntry, query: &SnapshotQuery) -> bool {
+    matches!(&query.range, InsightRangeSpec::Month(_))
+        || parse_date(&entry.occurred_at_local)
+            .map(|date| date <= query.reference_date)
+            .unwrap_or(false)
+}
+
+fn net_spending_total<'a>(entries: impl Iterator<Item = &'a LedgerEntry>) -> f64 {
+    let mut non_rent_expense = 0.0;
+    let mut rent_expense = 0.0;
+    let mut rent_credit = 0.0;
+
+    for entry in entries {
+        if !counts_in_insights(entry) {
+            continue;
+        }
+        match entry.entry_kind {
+            EntryKind::Expense if is_rent_expense(entry) => rent_expense += entry.amount.abs(),
+            EntryKind::Expense => non_rent_expense += entry.amount.abs(),
+            EntryKind::RentCredit => rent_credit += entry.amount.abs(),
+            _ => {}
+        }
+    }
+
+    non_rent_expense + (rent_expense - rent_credit).max(0.0)
+}
+
+fn net_spending_for_month(entries: &[LedgerEntry], month: &str) -> f64 {
+    net_spending_total(
+        entries
+            .iter()
+            .filter(|entry| month_key(&entry.occurred_at_local) == Some(month)),
+    )
+}
+
+fn net_category_spending<'a>(
+    entries: impl Iterator<Item = &'a LedgerEntry>,
+) -> HashMap<String, f64> {
+    let mut totals: HashMap<String, f64> = HashMap::new();
+    let mut rent_expense = 0.0;
+    let mut rent_credit = 0.0;
+
+    for entry in entries {
+        if !counts_in_insights(entry) {
+            continue;
+        }
+        match entry.entry_kind {
+            EntryKind::Expense if is_rent_expense(entry) => rent_expense += entry.amount.abs(),
+            EntryKind::Expense => {
+                *totals.entry(entry.category.clone()).or_insert(0.0) += entry.amount.abs();
+            }
+            EntryKind::RentCredit => rent_credit += entry.amount.abs(),
+            _ => {}
+        }
+    }
+
+    let net_rent = (rent_expense - rent_credit).max(0.0);
+    if net_rent > 0.0 || rent_expense > 0.0 || rent_credit > 0.0 {
+        totals.insert("rent".to_string(), net_rent);
+    }
+    totals
+}
+
+fn is_rent_rule(rule: &RecurringRule) -> bool {
+    is_rent_like(&format!("{} {} {}", rule.label, rule.category, rule.notes))
+}
+
+fn scheduled_fixed_net_total<'a>(
+    rules: impl Iterator<Item = &'a RecurringRule>,
+    from: NaiveDate,
+    until: NaiveDate,
+) -> AppResult<f64> {
+    let mut month_parts: HashMap<String, (f64, f64, f64)> = HashMap::new();
+
+    for rule in rules.filter(|rule| rule.status != RecurringStatus::Paused) {
+        if !matches!(rule.entry_kind, EntryKind::Expense | EntryKind::RentCredit) {
+            continue;
+        }
+        let dates = scheduled_dates(rule, from, until)?;
+        for date in dates {
+            let parts = month_parts
+                .entry(canonical_month_key(date))
+                .or_insert((0.0, 0.0, 0.0));
+            match rule.entry_kind {
+                EntryKind::Expense if is_rent_rule(rule) => parts.1 += rule.amount.abs(),
+                EntryKind::Expense => parts.0 += rule.amount.abs(),
+                EntryKind::RentCredit => parts.2 += rule.amount.abs(),
+                _ => {}
+            }
+        }
+    }
+
+    Ok(month_parts
+        .values()
+        .map(|(non_rent, rent, credit)| non_rent + (rent - credit).max(0.0))
+        .sum())
+}
+
 #[cfg(test)]
 fn entry_effect(entry: &LedgerEntry) -> f64 {
     entry_balance_effect(entry)
@@ -3164,15 +3274,7 @@ fn calculate_snapshot_with_query(
         .iter()
         .map(|account| account.current_balance)
         .sum::<f64>();
-    let this_month_spend = filtered_entries
-        .iter()
-        .filter(|entry| {
-            entry.entry_kind == EntryKind::Expense
-                && !entry.exclude_from_insights
-                && month_key(&entry.occurred_at_local) == Some(query.focus_month.as_str())
-        })
-        .map(|entry| entry.amount.abs())
-        .sum::<f64>();
+    let this_month_spend = net_spending_for_month(&filtered_entries, &query.focus_month);
     let this_month_cap = filtered_caps
         .iter()
         .filter(|cap| cap.month_key == query.focus_month)
@@ -3188,28 +3290,13 @@ fn calculate_snapshot_with_query(
     let remaining_window_start = query.reference_date.max(today_local());
     let current_month = current_month_key();
     let current_month_start = parse_month_start(&current_month)?;
-    let current_month_spend = filtered_entries
-        .iter()
-        .filter(|entry| {
-            entry.entry_kind == EntryKind::Expense
-                && !entry.exclude_from_insights
-                && month_key(&entry.occurred_at_local) == Some(current_month.as_str())
-        })
-        .map(|entry| entry.amount.abs())
-        .sum::<f64>();
+    let current_month_spend = net_spending_for_month(&filtered_entries, &current_month);
 
-    let spending_to_date = range_entries
-        .iter()
-        .filter(|entry| {
-            entry.entry_kind == EntryKind::Expense
-                && !entry.exclude_from_insights
-                && (matches!(&query.range, InsightRangeSpec::Month(_))
-                    || parse_date(&entry.occurred_at_local)
-                        .map(|date| date <= query.reference_date)
-                        .unwrap_or(false))
-        })
-        .map(|entry| entry.amount.abs())
-        .sum::<f64>();
+    let spending_to_date = net_spending_total(
+        range_entries
+            .iter()
+            .filter(|entry| entry_counts_to_date(entry, query)),
+    );
     let elapsed_month_count = query
         .range_months
         .iter()
@@ -3233,13 +3320,7 @@ fn calculate_snapshot_with_query(
     };
     let variable_spending_to_date = range_entries
         .iter()
-        .filter(|entry| {
-            is_variable_expense(entry)
-                && (matches!(&query.range, InsightRangeSpec::Month(_))
-                    || parse_date(&entry.occurred_at_local)
-                        .map(|date| date <= query.reference_date)
-                        .unwrap_or(false))
-        })
+        .filter(|entry| is_variable_expense(entry) && entry_counts_to_date(entry, query))
         .map(|entry| entry.amount.abs())
         .sum::<f64>();
     let average_variable_spend = variable_spending_to_date / elapsed_month_count;
@@ -3259,17 +3340,8 @@ fn calculate_snapshot_with_query(
     let predicted_variable_remaining =
         current_variable_remaining + average_variable_spend * future_month_count;
 
-    let remaining_fixed_bills = active_rules
-        .iter()
-        .filter(|rule| {
-            rule.status != RecurringStatus::Paused && rule.entry_kind == EntryKind::Expense
-        })
-        .map(|rule| {
-            let future_dates =
-                scheduled_dates(rule, remaining_window_start, range_end).unwrap_or_default();
-            future_dates.len() as f64 * rule.amount
-        })
-        .sum::<f64>();
+    let remaining_fixed_bills =
+        scheduled_fixed_net_total(active_rules.iter(), remaining_window_start, range_end)?;
 
     let remaining_caps = query
         .range_months
@@ -3363,14 +3435,10 @@ fn calculate_snapshot_with_query(
         })
         .collect::<Vec<_>>();
 
-    let mut category_map: HashMap<String, f64> = HashMap::new();
-    for entry in filtered_entries.iter().filter(|entry| {
-        entry.entry_kind == EntryKind::Expense
-            && !entry.exclude_from_insights
-            && month_key(&entry.occurred_at_local) == Some(query.focus_month.as_str())
-    }) {
-        *category_map.entry(entry.category.clone()).or_insert(0.0) += entry.amount;
-    }
+    let category_map =
+        net_category_spending(filtered_entries.iter().filter(|entry| {
+            month_key(&entry.occurred_at_local) == Some(query.focus_month.as_str())
+        }));
     let mut category_spend_this_month: Vec<ChartPoint> = category_map
         .into_iter()
         .map(|(label, value)| ChartPoint { label, value })
@@ -3383,17 +3451,19 @@ fn calculate_snapshot_with_query(
     });
 
     let mut category_average_map: HashMap<String, f64> = HashMap::new();
-    for entry in range_entries.iter().filter(|entry| {
-        entry.entry_kind == EntryKind::Expense
-            && !entry.exclude_from_insights
-            && (matches!(&query.range, InsightRangeSpec::Month(_))
-                || parse_date(&entry.occurred_at_local)
-                    .map(|date| date <= query.reference_date)
-                    .unwrap_or(false))
-    }) {
-        *category_average_map
-            .entry(entry.category.clone())
-            .or_insert(0.0) += entry.amount.abs();
+    for month in &query.range_months {
+        let month_start = parse_month_start(month)?;
+        if !matches!(&query.range, InsightRangeSpec::Month(_)) && month_start > query.reference_date
+        {
+            continue;
+        }
+        let monthly_categories = net_category_spending(range_entries.iter().filter(|entry| {
+            month_key(&entry.occurred_at_local) == Some(month.as_str())
+                && entry_counts_to_date(entry, query)
+        }));
+        for (category, value) in monthly_categories {
+            *category_average_map.entry(category).or_insert(0.0) += value;
+        }
     }
     let mut category_average_spend: Vec<ChartPoint> = category_average_map
         .into_iter()
@@ -3413,15 +3483,7 @@ fn calculate_snapshot_with_query(
         .range_months
         .iter()
         .map(|month| {
-            let value = filtered_entries
-                .iter()
-                .filter(|entry| {
-                    entry.entry_kind == EntryKind::Expense
-                        && !entry.exclude_from_insights
-                        && month_key(&entry.occurred_at_local) == Some(month.as_str())
-                })
-                .map(|entry| entry.amount.abs())
-                .sum::<f64>();
+            let value = net_spending_for_month(&filtered_entries, month);
             ChartPoint {
                 label: month.clone(),
                 value,
@@ -3448,13 +3510,7 @@ fn calculate_snapshot_with_query(
     let mut activity_groups = activity_groups_map
         .into_iter()
         .map(|(month_key, group_entries)| ActivityGroup {
-            total_expense: group_entries
-                .iter()
-                .filter(|entry| {
-                    entry.entry_kind == EntryKind::Expense && !entry.exclude_from_insights
-                })
-                .map(|entry| entry.amount)
-                .sum(),
+            total_expense: net_spending_total(group_entries.iter()),
             total_funding: group_entries
                 .iter()
                 .filter(|entry| {
@@ -3484,15 +3540,7 @@ fn calculate_snapshot_with_query(
     for month in &query.range_months {
         let month_start = parse_month_start(month)?;
         let month_end = end_of_month(month_start);
-        let spent = filtered_entries
-            .iter()
-            .filter(|entry| {
-                entry.entry_kind == EntryKind::Expense
-                    && !entry.exclude_from_insights
-                    && month_key(&entry.occurred_at_local) == Some(month.as_str())
-            })
-            .map(|entry| entry.amount)
-            .sum::<f64>();
+        let spent = net_spending_for_month(&filtered_entries, month);
         let cap_total = filtered_caps
             .iter()
             .filter(|cap| cap.month_key == *month)
@@ -3511,23 +3559,13 @@ fn calculate_snapshot_with_query(
                     })
                     .sum::<f64>()
         } else {
-            let fixed_remaining = active_rules
-                .iter()
-                .filter(|rule| {
-                    rule.status != RecurringStatus::Paused && rule.entry_kind == EntryKind::Expense
-                })
-                .map(|rule| {
-                    let due_from = if month_start == current_month_start {
-                        query.reference_date.max(month_start)
-                    } else {
-                        month_start
-                    };
-                    scheduled_dates(rule, due_from, month_end)
-                        .unwrap_or_default()
-                        .len() as f64
-                        * rule.amount
-                })
-                .sum::<f64>();
+            let due_from = if month_start == current_month_start {
+                query.reference_date.max(month_start)
+            } else {
+                month_start
+            };
+            let fixed_remaining =
+                scheduled_fixed_net_total(active_rules.iter(), due_from, month_end)?;
             let cap_remaining = if month_start == current_month_start {
                 (cap_total - current_month_spend).max(0.0)
             } else {
@@ -3566,6 +3604,7 @@ fn calculate_snapshot_with_query(
         "this_month_spend".to_string(),
         build_lines(vec![
             format!("This month expense total = {}", this_month_spend),
+            "Rent credit is subtracted from rent only; rent never goes below zero.".to_string(),
             format!("This month cap total = {}", this_month_cap),
             "Excluded entries are ignored here.".to_string(),
         ]),
@@ -3579,7 +3618,7 @@ fn calculate_snapshot_with_query(
             ),
             format!("Elapsed months used for averages = {}", elapsed_month_count),
             format!("Average monthly spend = {}", average_monthly_spend),
-            "Only expense entries included in insights are counted.".to_string(),
+            "Rent credit is subtracted from rent only; excluded entries are ignored.".to_string(),
         ]),
     );
     breakdowns.insert(
@@ -3740,7 +3779,7 @@ fn breakdown_for_metric(
                     month_point.map(|point| point.spent).unwrap_or(0.0)
                 ),
                 format!(
-                    "Ledger expense = {}",
+                    "Ledger net spend = {}",
                     month_activity
                         .map(|group| group.total_expense)
                         .unwrap_or(0.0)
@@ -7157,6 +7196,191 @@ mod tests {
     }
 
     #[test]
+    fn rent_credit_offsets_rent_in_all_spending_totals() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let current_month = current_month_key();
+        let current_month_start = parse_month_start(&current_month).unwrap();
+        update_settings_row(
+            &conn,
+            &AppSettings {
+                school_year_start_month: current_month_start.month(),
+                planning_start_month_key: current_month.clone(),
+                school_year_months: 1,
+                language: "EN".into(),
+                backup_retention: 50,
+                last_migration_version: 2,
+            },
+        )
+        .unwrap();
+
+        insert_account_raw(
+            &conn,
+            &Account {
+                id: "account-a".into(),
+                name: "Checking".into(),
+                r#type: AccountType::Checking,
+                opening_balance: 2000.0,
+                archived: false,
+                created_at: "2026-01-01T09:00:00".into(),
+                current_balance: 2000.0,
+            },
+        )
+        .unwrap();
+        insert_entry_raw(
+            &conn,
+            &LedgerEntry {
+                id: "rent-expense".into(),
+                account_id: "account-a".into(),
+                entry_kind: EntryKind::Expense,
+                amount: 1000.0,
+                occurred_at_local: date_to_occurrence_iso(current_month_start),
+                label: "Rent".into(),
+                category: "rent".into(),
+                notes: "".into(),
+                recurring_rule_id: None,
+                transfer_group_id: None,
+                exclude_from_insights: false,
+            },
+        )
+        .unwrap();
+        insert_entry_raw(
+            &conn,
+            &LedgerEntry {
+                id: "rent-credit".into(),
+                account_id: "account-a".into(),
+                entry_kind: EntryKind::RentCredit,
+                amount: 400.0,
+                occurred_at_local: date_to_occurrence_iso(current_month_start),
+                label: "Room rent".into(),
+                category: "rent".into(),
+                notes: "".into(),
+                recurring_rule_id: None,
+                transfer_group_id: None,
+                exclude_from_insights: false,
+            },
+        )
+        .unwrap();
+        insert_entry_raw(
+            &conn,
+            &LedgerEntry {
+                id: "food-expense".into(),
+                account_id: "account-a".into(),
+                entry_kind: EntryKind::Expense,
+                amount: 50.0,
+                occurred_at_local: date_to_occurrence_iso(current_month_start),
+                label: "Groceries".into(),
+                category: "food".into(),
+                notes: "".into(),
+                recurring_rule_id: None,
+                transfer_group_id: None,
+                exclude_from_insights: false,
+            },
+        )
+        .unwrap();
+
+        let snapshot = calculate_snapshot(&conn).unwrap();
+
+        assert_eq!(snapshot.rent_paid_this_month, 1000.0);
+        assert_eq!(snapshot.rent_credit_this_month, 400.0);
+        assert_eq!(snapshot.rent_net_this_month, 600.0);
+        assert_eq!(snapshot.this_month_spend, 650.0);
+        assert_eq!(snapshot.spending_to_date, 650.0);
+        assert_eq!(snapshot.monthly_series[0].spent, 650.0);
+        assert_eq!(snapshot.monthly_spending_totals[0].value, 650.0);
+        assert_eq!(snapshot.activity_groups[0].total_expense, 650.0);
+        assert!(snapshot
+            .category_spend_this_month
+            .iter()
+            .any(|point| point.label == "rent" && point.value == 600.0));
+        assert!(snapshot
+            .category_average_spend
+            .iter()
+            .any(|point| point.label == "rent" && point.value == 600.0));
+    }
+
+    #[test]
+    fn recurring_rent_credit_offsets_projected_rent() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let next_month_start = add_months(today_local(), 1)
+            .with_day(1)
+            .expect("valid first day");
+        let next_month = canonical_month_key(next_month_start);
+        update_settings_row(
+            &conn,
+            &AppSettings {
+                school_year_start_month: next_month_start.month(),
+                planning_start_month_key: next_month.clone(),
+                school_year_months: 1,
+                language: "EN".into(),
+                backup_retention: 50,
+                last_migration_version: 2,
+            },
+        )
+        .unwrap();
+
+        insert_account_raw(
+            &conn,
+            &Account {
+                id: "account-a".into(),
+                name: "Checking".into(),
+                r#type: AccountType::Checking,
+                opening_balance: 2000.0,
+                archived: false,
+                created_at: "2026-01-01T09:00:00".into(),
+                current_balance: 2000.0,
+            },
+        )
+        .unwrap();
+        insert_rule_raw(
+            &conn,
+            &RecurringRule {
+                id: "rent-rule".into(),
+                label: "Rent".into(),
+                entry_kind: EntryKind::Expense,
+                amount: 1000.0,
+                account_id: "account-a".into(),
+                category: "rent".into(),
+                notes: "".into(),
+                start_date: next_month_start.format("%Y-%m-%d").to_string(),
+                end_date: None,
+                frequency: RecurringFrequency::Monthly,
+                status: RecurringStatus::Automatic,
+                last_applied_local: None,
+            },
+        )
+        .unwrap();
+        insert_rule_raw(
+            &conn,
+            &RecurringRule {
+                id: "rent-credit-rule".into(),
+                label: "Room rent credit".into(),
+                entry_kind: EntryKind::RentCredit,
+                amount: 400.0,
+                account_id: "account-a".into(),
+                category: "rent".into(),
+                notes: "".into(),
+                start_date: next_month_start.format("%Y-%m-%d").to_string(),
+                end_date: None,
+                frequency: RecurringFrequency::Monthly,
+                status: RecurringStatus::Automatic,
+                last_applied_local: None,
+            },
+        )
+        .unwrap();
+
+        let snapshot = calculate_snapshot_for_query(&conn, Some(next_month), None).unwrap();
+
+        assert_eq!(snapshot.planned_remaining_spending, 600.0);
+        assert_eq!(snapshot.projected_end_of_year_cushion, 1400.0);
+        assert_eq!(snapshot.school_year_runway_remaining, 1400.0);
+        assert_eq!(snapshot.monthly_series[0].runway_balance, 1400.0);
+    }
+
+    #[test]
     fn school_year_snapshot_keeps_history_visible_and_projects_from_current_balance() {
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
@@ -7330,7 +7554,7 @@ mod tests {
         assert!(breakdown
             .lines
             .iter()
-            .any(|line| line == "Ledger expense = 85"));
+            .any(|line| line == "Ledger net spend = 85"));
         assert!(breakdown.lines.iter().any(|line| line == "Cap = 120"));
     }
 

@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as api from "../lib/api";
@@ -114,5 +115,26 @@ describe("EntryDialog", () => {
     );
     expect(document.querySelector('datalist#entry-label-options option[value="Groceries"]')).not.toBeNull();
     expect(document.querySelector('datalist#entry-category-options option[value="transport"]')).not.toBeNull();
+  });
+
+  it("defaults funding entries to income categories", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <EntryDialog
+        accounts={[activeAccount]}
+        entry={null}
+        onOpenChange={vi.fn()}
+        onSaved={vi.fn().mockResolvedValue(undefined)}
+        open
+      />,
+    );
+
+    await user.selectOptions(screen.getByLabelText("Entry kind"), "funding");
+
+    expect(screen.getByPlaceholderText("Pick or type a category")).toHaveValue("income");
+    expect(
+      document.querySelector('datalist#entry-category-options option[value="other funding"]'),
+    ).not.toBeNull();
   });
 });

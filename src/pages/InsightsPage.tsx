@@ -24,7 +24,7 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
       return {
         ...series,
         funding: activity?.total_funding ?? 0,
-        expense: activity?.total_expense ?? 0,
+        net_spend: activity?.total_expense ?? 0,
         rent_credit: activity?.total_rent_credit ?? 0,
       };
     });
@@ -221,8 +221,8 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
             <thead>
               <tr>
                 <th>Month</th>
-                <th>Graph spend</th>
-                <th>Ledger expense</th>
+                <th>Net spend</th>
+                <th>Ledger net</th>
                 <th>Funding</th>
                 <th>Rent credit</th>
                 <th>Cap</th>
@@ -235,7 +235,7 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
                   <tr key={row.month_key}>
                     <td>{monthLabel(row.month_key)}</td>
                     <td>{currency(row.spent)}</td>
-                    <td>{currency(row.expense)}</td>
+                    <td>{currency(row.net_spend)}</td>
                     <td>{currency(row.funding)}</td>
                     <td>{currency(row.rent_credit)}</td>
                     <td>{currency(row.cap)}</td>

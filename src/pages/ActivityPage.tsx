@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { deleteEntry } from "../lib/api";
 import { QuickAddBar } from "../components/QuickAddBar";
 import { compactDate, currency, monthLabel } from "../lib/format";
+import { netSpendingTotal } from "../lib/spending";
 import type { Account, LedgerEntry, MonthlyCap, RecurringRule } from "../lib/types";
 import { MetricCard } from "../components/MetricCard";
 import styles from "./Page.module.css";
@@ -19,6 +20,7 @@ interface ActivityPageProps {
 
 type ActivityTotals = {
   expense: number;
+  netSpending: number;
   funding: number;
   rentCredit: number;
   adjustment: number;
@@ -27,6 +29,7 @@ type ActivityTotals = {
 
 const zeroTotals = (): ActivityTotals => ({
   expense: 0,
+  netSpending: 0,
   funding: 0,
   rentCredit: 0,
   adjustment: 0,
@@ -72,16 +75,23 @@ export function ActivityPage({
     });
   }, [accountId, entries, monthKey, search]);
 
-  const filteredTotals = useMemo(() => {
-    return filtered.reduce((totals, entry) => {
-      if (entry.entry_kind === "expense") totals.expense += entry.amount;
-      if (entry.entry_kind === "funding") totals.funding += entry.amount;
-      if (entry.entry_kind === "rent_credit") totals.rentCredit += entry.amount;
-      if (entry.entry_kind === "adjustment") totals.adjustment += entry.amount;
-      if (entry.exclude_from_insights) totals.excluded += 1;
-      return totals;
+  const aggregateTotals = (items: LedgerEntry[]) => {
+    const totals = items.reduce((current, entry) => {
+      if (entry.exclude_from_insights) {
+        current.excluded += 1;
+        return current;
+      }
+      if (entry.entry_kind === "expense") current.expense += Math.abs(entry.amount);
+      if (entry.entry_kind === "funding") current.funding += Math.abs(entry.amount);
+      if (entry.entry_kind === "rent_credit") current.rentCredit += Math.abs(entry.amount);
+      if (entry.entry_kind === "adjustment") current.adjustment += entry.amount;
+      return current;
     }, zeroTotals());
-  }, [filtered]);
+    totals.netSpending = netSpendingTotal(items);
+    return totals;
+  };
+
+  const filteredTotals = useMemo(() => aggregateTotals(filtered), [filtered]);
 
   const grouped = useMemo(() => {
     const byMonth = new Map<
@@ -101,16 +111,12 @@ export function ActivityPage({
 
       current.entries.push(entry);
 
-      if (entry.entry_kind === "expense") current.totals.expense += entry.amount;
-      if (entry.entry_kind === "funding") current.totals.funding += entry.amount;
-      if (entry.entry_kind === "rent_credit") current.totals.rentCredit += entry.amount;
-      if (entry.entry_kind === "adjustment") current.totals.adjustment += entry.amount;
-      if (entry.exclude_from_insights) current.totals.excluded += 1;
-
       byMonth.set(key, current);
     });
 
-    return Array.from(byMonth.entries()).sort(([left], [right]) => right.localeCompare(left));
+    return Array.from(byMonth.entries())
+      .map(([key, value]) => [key, { ...value, totals: aggregateTotals(value.entries) }] as const)
+      .sort(([left], [right]) => right.localeCompare(left));
   }, [filtered]);
 
   const handleDelete = async (entryId: string) => {
@@ -143,14 +149,14 @@ export function ActivityPage({
 
       <div className={styles.grid3}>
         <MetricCard
-          eyebrow="Filtered expense"
-          note={`${filtered.length} entry or entries in the current result set.`}
-          title="Expenses"
-          value={currency(filteredTotals.expense)}
+          eyebrow="Filtered spending"
+          note={`Expenses minus rent credit, with rent never below zero. ${filtered.length} entry or entries in view.`}
+          title="Net spending"
+          value={currency(filteredTotals.netSpending)}
         />
         <MetricCard
           eyebrow="Filtered inflow"
-          note="Funding and rent credit stay separated in ledger math."
+          note={`Funding inflows affect balances, not spending totals.`}
           title="Funding"
           value={currency(filteredTotals.funding)}
         />
@@ -218,7 +224,12 @@ export function ActivityPage({
                 <strong>{monthState.entries.length} ledger entries</strong>
               </div>
               <div className={styles.groupTotals}>
-                <span className={styles.groupTotal}>Expense {currency(monthState.totals.expense)}</span>
+                <span className={styles.groupTotal}>
+                  Net spend {currency(monthState.totals.netSpending)}
+                </span>
+                <span className={styles.groupTotal}>
+                  Expense {currency(monthState.totals.expense)}
+                </span>
                 <span className={styles.groupTotal}>Funding {currency(monthState.totals.funding)}</span>
                 <span className={styles.groupTotal}>
                   Rent credit {currency(monthState.totals.rentCredit)}

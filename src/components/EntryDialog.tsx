@@ -25,6 +25,13 @@ const ENTRY_KINDS: Exclude<EntryKind, "transfer">[] = [
   "adjustment",
 ];
 
+const defaultCategoryForKind = (kind: Exclude<EntryKind, "transfer">) => {
+  if (kind === "funding") return "income";
+  if (kind === "rent_credit") return "rent";
+  if (kind === "adjustment") return "adjustment";
+  return "misc";
+};
+
 export function EntryDialog({
   accounts,
   entries = [],
@@ -52,8 +59,8 @@ export function EntryDialog({
     [entries, recurringRules],
   );
   const categoryChoices = useMemo(
-    () => categoryOptions(entries, recurringRules, monthlyCaps),
-    [entries, monthlyCaps, recurringRules],
+    () => categoryOptions(entries, recurringRules, monthlyCaps, entryKind),
+    [entries, entryKind, monthlyCaps, recurringRules],
   );
   const accountOptions = useMemo(() => {
     const options = [...activeAccounts];
@@ -87,10 +94,17 @@ export function EntryDialog({
     setAmount("0");
     setOccurredAt(localNowIso());
     setLabel("");
-    setCategory("misc");
+    setCategory(defaultCategoryForKind("expense"));
     setNotes("");
     setExclude(false);
   }, [activeAccounts, entry, open]);
+
+  const handleKindChange = (kind: Exclude<EntryKind, "transfer">) => {
+    setEntryKind(kind);
+    if (!entry && ["misc", "income", "rent", "adjustment", ""].includes(category)) {
+      setCategory(defaultCategoryForKind(kind));
+    }
+  };
 
   const handleSubmit = async () => {
     if (!entry && !accountId) {
@@ -172,7 +186,7 @@ export function EntryDialog({
               <select
                 className={styles.select}
                 onChange={(event) =>
-                  setEntryKind(event.target.value as Exclude<EntryKind, "transfer">)
+                  handleKindChange(event.target.value as Exclude<EntryKind, "transfer">)
                 }
                 value={entryKind}
               >
