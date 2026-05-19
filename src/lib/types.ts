@@ -64,6 +64,14 @@ export interface MonthlyCap {
   month_key: string;
 }
 
+export interface GenerateCapsFromHistoryResult {
+  created: number;
+  updated: number;
+  unchanged: number;
+  months: number;
+  categories: number;
+}
+
 export interface AppSettings {
   school_year_start_month: number;
   planning_start_month_key: string;

@@ -214,6 +214,15 @@ struct BreakdownContextPayload {
     category: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct GenerateCapsFromHistoryResult {
+    created: u32,
+    updated: u32,
+    unchanged: u32,
+    months: u32,
+    categories: u32,
+}
+
 #[derive(Debug, Clone)]
 enum UndoAction {
     ReplaceEntry {
@@ -515,6 +524,7 @@ pub fn run() {
             apply_recurring_rule_now,
             list_monthly_caps,
             set_monthly_cap,
+            generate_caps_from_history,
             delete_monthly_cap,
             get_insights,
             get_calculation_breakdown,
@@ -1435,6 +1445,45 @@ fn net_category_spending<'a>(
 
 fn category_key(category: &str) -> String {
     category.trim().to_lowercase()
+}
+
+fn is_variable_cap_entry(entry: &LedgerEntry) -> bool {
+    entry.entry_kind == EntryKind::Expense
+        && !entry.exclude_from_insights
+        && entry.recurring_rule_id.is_none()
+        && !is_rent_expense(entry)
+        && !entry.category.trim().is_empty()
+}
+
+fn variable_spending_for_month(entries: &[LedgerEntry], month: &str) -> f64 {
+    entries
+        .iter()
+        .filter(|entry| month_key(&entry.occurred_at_local) == Some(month))
+        .filter(|entry| is_variable_cap_entry(entry))
+        .map(|entry| entry.amount.abs())
+        .sum()
+}
+
+fn rolling_average_before_month(
+    range_months: &[String],
+    monthly_values: &HashMap<String, f64>,
+    target_month: &str,
+    latest_actual_month: &str,
+    fallback: f64,
+) -> f64 {
+    let previous_months = range_months
+        .iter()
+        .filter(|month| month.as_str() < target_month && month.as_str() <= latest_actual_month)
+        .collect::<Vec<_>>();
+    if previous_months.is_empty() {
+        return fallback;
+    }
+
+    previous_months
+        .iter()
+        .map(|month| monthly_values.get(month.as_str()).copied().unwrap_or(0.0))
+        .sum::<f64>()
+        / previous_months.len() as f64
 }
 
 #[derive(Debug, Default)]
@@ -2770,6 +2819,143 @@ fn insert_cap_raw(conn: &Connection, cap: &MonthlyCap) -> AppResult<()> {
     Ok(())
 }
 
+fn round_history_cap_amount(value: f64) -> f64 {
+    if value <= 0.0 {
+        return 0.0;
+    }
+    ((value / 5.0).ceil() * 5.0).max(5.0)
+}
+
+fn cap_amount_from_previous_category_data(
+    month: &str,
+    category_values: &HashMap<String, f64>,
+) -> Option<f64> {
+    let previous_values = category_values
+        .iter()
+        .filter(|(entry_month, amount)| entry_month.as_str() < month && **amount > 0.0)
+        .map(|(_, amount)| *amount)
+        .collect::<Vec<_>>();
+
+    let raw_amount = if previous_values.is_empty() {
+        category_values.get(month).copied().unwrap_or(0.0)
+    } else {
+        previous_values.iter().sum::<f64>() / previous_values.len() as f64
+    };
+
+    let rounded = round_history_cap_amount(raw_amount);
+    (rounded > 0.0).then_some(rounded)
+}
+
+fn generate_caps_from_history_internal(
+    conn: &mut Connection,
+    settings: &AppSettings,
+) -> AppResult<GenerateCapsFromHistoryResult> {
+    let accounts = fetch_accounts(conn)?;
+    let active_account_ids = accounts
+        .iter()
+        .filter(|account| !account.archived)
+        .map(|account| account.id.clone())
+        .collect::<HashSet<_>>();
+    let entries = fetch_entries(conn)?;
+    let mut months = school_year_month_keys(settings, today_local())
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut category_display_by_key: HashMap<String, String> = HashMap::new();
+    let mut category_values_by_key: HashMap<String, HashMap<String, f64>> = HashMap::new();
+
+    for entry in entries
+        .iter()
+        .filter(|entry| active_account_ids.contains(&entry.account_id))
+        .filter(|entry| is_variable_cap_entry(entry))
+    {
+        let Some(month) = month_key(&entry.occurred_at_local) else {
+            continue;
+        };
+        months.insert(month.to_string());
+        let category = entry.category.trim();
+        let key = category_key(category);
+        category_display_by_key
+            .entry(key.clone())
+            .or_insert_with(|| category.to_string());
+        *category_values_by_key
+            .entry(key)
+            .or_default()
+            .entry(month.to_string())
+            .or_insert(0.0) += entry.amount.abs();
+    }
+
+    let existing_caps = fetch_monthly_caps(conn)?;
+    let existing_by_month_category = existing_caps
+        .iter()
+        .map(|cap| {
+            (
+                (cap.month_key.clone(), category_key(&cap.category)),
+                cap.clone(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut created = 0;
+    let mut updated = 0;
+    let mut unchanged = 0;
+    let mut generated_categories = BTreeSet::new();
+    let tx = conn.transaction()?;
+
+    for month in &months {
+        for (category_key_value, category_values) in &category_values_by_key {
+            let Some(amount) = cap_amount_from_previous_category_data(month, category_values)
+            else {
+                continue;
+            };
+            generated_categories.insert(category_key_value.clone());
+            let existing =
+                existing_by_month_category.get(&(month.clone(), category_key_value.clone()));
+            let cap = MonthlyCap {
+                id: existing
+                    .as_ref()
+                    .map(|item| item.id.clone())
+                    .unwrap_or_else(|| Uuid::new_v4().to_string()),
+                category: existing
+                    .as_ref()
+                    .map(|item| item.category.clone())
+                    .unwrap_or_else(|| {
+                        category_display_by_key
+                            .get(category_key_value)
+                            .cloned()
+                            .unwrap_or_else(|| category_key_value.clone())
+                    }),
+                amount,
+                month_key: month.clone(),
+            };
+
+            if existing
+                .as_ref()
+                .is_some_and(|item| (item.amount - amount).abs() < 0.005)
+            {
+                unchanged += 1;
+                continue;
+            }
+
+            insert_cap_raw(&tx, &cap)?;
+            queue_sync_outbox(&tx, "monthly_cap", &cap.id, "upsert", &cap)?;
+            if existing.is_some() {
+                updated += 1;
+            } else {
+                created += 1;
+            }
+        }
+    }
+
+    tx.commit()?;
+    Ok(GenerateCapsFromHistoryResult {
+        created,
+        updated,
+        unchanged,
+        months: months.len() as u32,
+        categories: generated_categories.len() as u32,
+    })
+}
+
 fn insert_account_raw(conn: &Connection, account: &Account) -> AppResult<()> {
     conn.execute(
         "INSERT OR REPLACE INTO accounts (id, name, type, opening_balance, archived, created_at) VALUES (?1, ?2, ?3, ?4, ?5, COALESCE((SELECT created_at FROM accounts WHERE id = ?1), ?6))",
@@ -3433,41 +3619,45 @@ fn calculate_snapshot_with_query(
         .count()
         .max(1) as f64;
     let average_monthly_spend = spending_to_date / elapsed_month_count;
-    let future_month_count = query
+    let mut variable_spend_by_month: HashMap<String, f64> = HashMap::new();
+    for month in &query.range_months {
+        let value = range_entries
+            .iter()
+            .filter(|entry| {
+                is_variable_cap_entry(entry)
+                    && month_key(&entry.occurred_at_local) == Some(month.as_str())
+                    && entry_counts_to_date(entry, query)
+            })
+            .map(|entry| entry.amount.abs())
+            .sum::<f64>();
+        variable_spend_by_month.insert(month.clone(), value);
+    }
+    let variable_spending_to_date = variable_spend_by_month.values().sum::<f64>();
+    let average_variable_spend = variable_spending_to_date / elapsed_month_count;
+    let current_variable_spend = variable_spend_by_month
+        .get(&current_month)
+        .copied()
+        .unwrap_or_else(|| variable_spending_for_month(&filtered_entries, &current_month));
+    let predicted_variable_remaining = query
         .range_months
         .iter()
-        .filter(|month| month.as_str() > current_month.as_str())
-        .count() as f64;
-    let is_variable_expense = |entry: &LedgerEntry| {
-        entry.entry_kind == EntryKind::Expense
-            && !entry.exclude_from_insights
-            && entry.recurring_rule_id.is_none()
-            && !is_rent_like(&format!(
-                "{} {} {}",
-                entry.label, entry.category, entry.notes
-            ))
-    };
-    let variable_spending_to_date = range_entries
-        .iter()
-        .filter(|entry| is_variable_expense(entry) && entry_counts_to_date(entry, query))
-        .map(|entry| entry.amount.abs())
-        .sum::<f64>();
-    let average_variable_spend = variable_spending_to_date / elapsed_month_count;
-    let current_variable_spend = filtered_entries
-        .iter()
-        .filter(|entry| {
-            is_variable_expense(entry)
-                && month_key(&entry.occurred_at_local) == Some(current_month.as_str())
+        .filter(|month| month.as_str() >= current_month.as_str())
+        .map(|month| {
+            let fallback = variable_spend_by_month.get(month).copied().unwrap_or(0.0);
+            let predicted_variable = rolling_average_before_month(
+                &query.range_months,
+                &variable_spend_by_month,
+                month,
+                &current_month,
+                fallback,
+            );
+            if month == &current_month {
+                (predicted_variable - current_variable_spend).max(0.0)
+            } else {
+                predicted_variable
+            }
         })
-        .map(|entry| entry.amount.abs())
         .sum::<f64>();
-    let current_variable_remaining = if range_month_set.contains(&current_month) {
-        (average_variable_spend - current_variable_spend).max(0.0)
-    } else {
-        0.0
-    };
-    let predicted_variable_remaining =
-        current_variable_remaining + average_variable_spend * future_month_count;
 
     let remaining_fixed_bills =
         scheduled_fixed_net_total(active_rules.iter(), remaining_window_start, range_end)?;
@@ -3677,8 +3867,19 @@ fn calculate_snapshot_with_query(
             "future"
         };
 
-        let (planned_spend, predicted_spend, runway_balance) = if month_start < current_month_start
-        {
+        let fixed_full_month =
+            scheduled_fixed_net_total(active_rules.iter(), month_start, month_end)?;
+        let variable_prediction = rolling_average_before_month(
+            &query.range_months,
+            &variable_spend_by_month,
+            month,
+            &current_month,
+            variable_spend_by_month.get(month).copied().unwrap_or(0.0),
+        );
+        let planned_spend = fixed_full_month + cap_total;
+        let predicted_spend = fixed_full_month + variable_prediction;
+
+        let runway_balance = if month_start < current_month_start {
             let runway_balance = opening_balance_total
                 + balance_entries
                     .iter()
@@ -3689,7 +3890,7 @@ fn calculate_snapshot_with_query(
                             .map(|_| entry_balance_effect(entry))
                     })
                     .sum::<f64>();
-            (spent, spent, runway_balance)
+            runway_balance
         } else {
             let due_from = if month_start == current_month_start {
                 query.reference_date.max(month_start)
@@ -3703,15 +3904,8 @@ fn calculate_snapshot_with_query(
             } else {
                 cap_total
             };
-            let variable_prediction = if month_start == current_month_start {
-                current_variable_remaining
-            } else {
-                average_variable_spend
-            };
-            let planned_spend = spent + fixed_remaining + cap_remaining;
-            let predicted_spend = spent + fixed_remaining + variable_prediction;
             projected_balance -= fixed_remaining + cap_remaining;
-            (planned_spend, predicted_spend, projected_balance)
+            projected_balance
         };
 
         monthly_series.push(MonthlySeriesPoint {
@@ -3793,6 +3987,8 @@ fn calculate_snapshot_with_query(
                 average_variable_spend
             ),
             format!("Current variable spend = {}", current_variable_spend),
+            "Each month prediction uses the average variable spend from earlier months in the selected range."
+                .to_string(),
             format!(
                 "Predicted variable remaining = {}",
                 predicted_variable_remaining
@@ -3958,12 +4154,16 @@ fn breakdown_for_metric(
                     "Planned spend = {}",
                     month_point.map(|point| point.planned_spend).unwrap_or(0.0)
                 ),
+                "Monthly planned spend = full-month fixed bills plus that month's cap total."
+                    .to_string(),
                 format!(
                     "Predicted spend = {}",
                     month_point
                         .map(|point| point.predicted_spend)
                         .unwrap_or(0.0)
                 ),
+                "Monthly predicted spend = full-month fixed bills plus average variable spend from earlier months."
+                    .to_string(),
                 format!(
                     "Month phase = {}",
                     month_point
@@ -5854,6 +6054,24 @@ fn set_monthly_cap(
         .backup_retention;
     let _ = backup_database(&state.env, retention).map_err(|err| err.to_string())?;
     Ok(cap)
+}
+
+#[tauri::command]
+fn generate_caps_from_history(
+    state: State<'_, AppState>,
+) -> Result<GenerateCapsFromHistoryResult, String> {
+    ensure_environment(&state).map_err(|err| err.to_string())?;
+    let mut conn = open_connection(&state.env.db_path).map_err(|err| err.to_string())?;
+    let settings = fetch_settings(&conn).map_err(|err| err.to_string())?;
+    let previous = snapshot_payload(&conn).map_err(|err| err.to_string())?;
+    let result =
+        generate_caps_from_history_internal(&mut conn, &settings).map_err(|err| err.to_string())?;
+    if result.created > 0 || result.updated > 0 {
+        push_undo(&state, UndoAction::RestoreSnapshot { payload: previous });
+        let retention = settings.backup_retention;
+        let _ = backup_database(&state.env, retention).map_err(|err| err.to_string())?;
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -7758,6 +7976,177 @@ mod tests {
         assert_eq!(snapshot.category_average_spend[0].value, 50.0);
         assert_eq!(snapshot.category_average_spend[1].label, "school");
         assert_eq!(snapshot.category_average_spend[1].value, 25.0);
+    }
+
+    #[test]
+    fn monthly_series_uses_caps_for_planned_and_rolling_history_for_predicted() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        update_settings_row(
+            &conn,
+            &AppSettings {
+                school_year_start_month: 1,
+                planning_start_month_key: "2025-01".into(),
+                school_year_months: 4,
+                language: "EN".into(),
+                backup_retention: 50,
+                last_migration_version: 2,
+            },
+        )
+        .unwrap();
+        insert_account_raw(
+            &conn,
+            &Account {
+                id: "account-a".into(),
+                name: "Checking".into(),
+                r#type: AccountType::Checking,
+                opening_balance: 2000.0,
+                archived: false,
+                created_at: "2025-01-01T09:00:00".into(),
+                current_balance: 2000.0,
+            },
+        )
+        .unwrap();
+        for (month, amount) in [("2025-01", 100.0), ("2025-02", 200.0), ("2025-03", 300.0)] {
+            insert_entry_raw(
+                &conn,
+                &LedgerEntry {
+                    id: format!("{month}-food"),
+                    account_id: "account-a".into(),
+                    entry_kind: EntryKind::Expense,
+                    amount,
+                    occurred_at_local: format!("{month}-05T10:00:00"),
+                    label: "Groceries".into(),
+                    category: "food".into(),
+                    notes: "".into(),
+                    recurring_rule_id: None,
+                    transfer_group_id: None,
+                    exclude_from_insights: false,
+                },
+            )
+            .unwrap();
+        }
+        insert_rule_raw(
+            &conn,
+            &RecurringRule {
+                id: "phone-rule".into(),
+                label: "Phone".into(),
+                entry_kind: EntryKind::Expense,
+                amount: 50.0,
+                account_id: "account-a".into(),
+                category: "phone".into(),
+                notes: "".into(),
+                start_date: "2025-01-01".into(),
+                end_date: None,
+                frequency: RecurringFrequency::Monthly,
+                status: RecurringStatus::Automatic,
+                last_applied_local: None,
+            },
+        )
+        .unwrap();
+        for (month, amount) in [
+            ("2025-01", 150.0),
+            ("2025-02", 160.0),
+            ("2025-03", 170.0),
+            ("2025-04", 180.0),
+        ] {
+            insert_cap_raw(
+                &conn,
+                &MonthlyCap {
+                    id: format!("{month}-food-cap"),
+                    category: "food".into(),
+                    amount,
+                    month_key: month.into(),
+                },
+            )
+            .unwrap();
+        }
+
+        let snapshot =
+            calculate_snapshot_for_query(&conn, Some("school_year".into()), None).unwrap();
+        let by_month = snapshot
+            .monthly_series
+            .iter()
+            .map(|item| (item.month_key.as_str(), item))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(by_month["2025-01"].planned_spend, 200.0);
+        assert_eq!(by_month["2025-01"].predicted_spend, 150.0);
+        assert_eq!(by_month["2025-02"].planned_spend, 210.0);
+        assert_eq!(by_month["2025-02"].predicted_spend, 150.0);
+        assert_eq!(by_month["2025-03"].planned_spend, 220.0);
+        assert_eq!(by_month["2025-03"].predicted_spend, 200.0);
+        assert_eq!(by_month["2025-04"].planned_spend, 230.0);
+        assert_eq!(by_month["2025-04"].predicted_spend, 250.0);
+    }
+
+    #[test]
+    fn generate_caps_from_history_fills_months_from_previous_variable_spending() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let settings = AppSettings {
+            school_year_start_month: 1,
+            planning_start_month_key: "2025-01".into(),
+            school_year_months: 4,
+            language: "EN".into(),
+            backup_retention: 50,
+            last_migration_version: 2,
+        };
+        update_settings_row(&conn, &settings).unwrap();
+        insert_account_raw(
+            &conn,
+            &Account {
+                id: "account-a".into(),
+                name: "Checking".into(),
+                r#type: AccountType::Checking,
+                opening_balance: 2000.0,
+                archived: false,
+                created_at: "2025-01-01T09:00:00".into(),
+                current_balance: 2000.0,
+            },
+        )
+        .unwrap();
+        for (id, month, label, category, amount) in [
+            ("jan-food", "2025-01", "Groceries", "food", 103.0),
+            ("feb-food", "2025-02", "Groceries", "food", 207.0),
+            ("mar-transport", "2025-03", "Bus", "transport", 12.0),
+            ("rent", "2025-01", "Rent", "rent", 900.0),
+        ] {
+            insert_entry_raw(
+                &conn,
+                &LedgerEntry {
+                    id: id.into(),
+                    account_id: "account-a".into(),
+                    entry_kind: EntryKind::Expense,
+                    amount,
+                    occurred_at_local: format!("{month}-05T10:00:00"),
+                    label: label.into(),
+                    category: category.into(),
+                    notes: "".into(),
+                    recurring_rule_id: None,
+                    transfer_group_id: None,
+                    exclude_from_insights: false,
+                },
+            )
+            .unwrap();
+        }
+
+        let result = generate_caps_from_history_internal(&mut conn, &settings).unwrap();
+        let caps = fetch_monthly_caps(&conn).unwrap();
+        let cap_lookup = caps
+            .iter()
+            .map(|cap| ((cap.month_key.as_str(), cap.category.as_str()), cap.amount))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(result.months, 4);
+        assert_eq!(result.categories, 2);
+        assert_eq!(cap_lookup[&("2025-01", "food")], 105.0);
+        assert_eq!(cap_lookup[&("2025-02", "food")], 105.0);
+        assert_eq!(cap_lookup[&("2025-03", "food")], 155.0);
+        assert_eq!(cap_lookup[&("2025-04", "food")], 155.0);
+        assert_eq!(cap_lookup[&("2025-03", "transport")], 15.0);
+        assert_eq!(cap_lookup[&("2025-04", "transport")], 15.0);
+        assert!(!caps.iter().any(|cap| cap.category == "rent"));
     }
 
     #[test]

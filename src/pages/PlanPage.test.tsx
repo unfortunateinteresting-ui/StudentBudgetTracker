@@ -11,6 +11,7 @@ vi.mock("../lib/api", () => ({
   createRecurringRule: vi.fn(),
   deleteMonthlyCap: vi.fn(),
   deleteRecurringRule: vi.fn(),
+  generateCapsFromHistory: vi.fn(),
   setMonthlyCap: vi.fn(),
   updateRecurringRule: vi.fn(),
 }));
@@ -161,6 +162,13 @@ describe("PlanPage", () => {
     vi.mocked(api.createRecurringRule).mockResolvedValue(undefined);
     vi.mocked(api.deleteMonthlyCap).mockResolvedValue(undefined);
     vi.mocked(api.deleteRecurringRule).mockResolvedValue(undefined);
+    vi.mocked(api.generateCapsFromHistory).mockResolvedValue({
+      created: 0,
+      updated: 0,
+      unchanged: 0,
+      months: 0,
+      categories: 0,
+    });
     vi.mocked(api.setMonthlyCap).mockResolvedValue(undefined);
     vi.mocked(api.updateRecurringRule).mockResolvedValue(undefined);
   });
@@ -321,5 +329,40 @@ describe("PlanPage", () => {
     expect(capSection).not.toBeNull();
     expect(within(capSection as HTMLElement).getByText("transport")).toBeInTheDocument();
     expect(within(capSection as HTMLElement).queryByText("food")).not.toBeInTheDocument();
+  });
+
+  it("generates monthly caps from history after confirmation", async () => {
+    const user = userEvent.setup();
+    const onRefresh = vi.fn().mockResolvedValue(undefined);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.mocked(api.generateCapsFromHistory).mockResolvedValue({
+      created: 8,
+      updated: 3,
+      unchanged: 2,
+      months: 9,
+      categories: 4,
+    });
+
+    render(
+      <PlanPage
+        accounts={accounts}
+        monthlyCaps={monthlyCaps}
+        onRefresh={onRefresh}
+        onWhy={vi.fn()}
+        recurringRules={recurringRules}
+        settings={settings}
+        snapshot={snapshot}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Generate from history" }));
+
+    await waitFor(() => {
+      expect(api.generateCapsFromHistory).toHaveBeenCalled();
+    });
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(onRefresh).toHaveBeenCalled();
+    expect(screen.getByText(/8 created, 3 updated, 2 already current/)).toBeInTheDocument();
+    confirmSpy.mockRestore();
   });
 });

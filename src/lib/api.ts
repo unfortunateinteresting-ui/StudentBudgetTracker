@@ -8,6 +8,7 @@ import type {
   CreateEntryInput,
   CreateTransferInput,
   EntryFilters,
+  GenerateCapsFromHistoryResult,
   InsightSnapshot,
   LanPeerCandidate,
   LanSyncSendInput,
@@ -80,6 +81,9 @@ export const listMonthlyCaps = () =>
 
 export const setMonthlyCap = (input: MonthlyCapInput) =>
   invoke("set_monthly_cap", { input });
+
+export const generateCapsFromHistory = () =>
+  invoke<GenerateCapsFromHistoryResult>("generate_caps_from_history");
 
 export const deleteMonthlyCap = (capId: string) =>
   invoke("delete_monthly_cap", { capId });

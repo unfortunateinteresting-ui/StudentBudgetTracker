@@ -5,6 +5,7 @@ import {
   createRecurringRule,
   deleteMonthlyCap,
   deleteRecurringRule,
+  generateCapsFromHistory,
   setMonthlyCap,
   updateRecurringRule,
 } from "../lib/api";
@@ -365,6 +366,26 @@ export function PlanPage({
 
     if (saved) {
       resetCapForm();
+    }
+  };
+
+  const handleGenerateCaps = async () => {
+    const shouldContinue = window.confirm(
+      "Generate caps from variable spending history? This can update existing cap amounts, and undo will restore the previous state.",
+    );
+    if (!shouldContinue) {
+      return;
+    }
+
+    try {
+      const result = await generateCapsFromHistory();
+      setNotice({
+        kind: "success",
+        text: `Caps generated from history: ${result.created} created, ${result.updated} updated, ${result.unchanged} already current across ${result.months} months.`,
+      });
+      await onRefresh();
+    } catch (error) {
+      setNotice({ kind: "error", text: String(error) });
     }
   };
 
@@ -865,25 +886,39 @@ export function PlanPage({
 
           <SectionCard
             action={
-              <label className={styles.headerControl}>
-                <span className={styles.controlLabel}>Show month</span>
-                <select
-                  className={styles.select}
+              <div className={styles.rowActions}>
+                <button
+                  className={styles.secondaryButton}
                   disabled={Boolean(editingCap)}
-                  onChange={(event) => setVisibleCapMonth(event.target.value)}
-                  value={visibleCapMonth}
+                  onClick={() => void handleGenerateCaps()}
+                  type="button"
                 >
-                  {capMonthOptions.map((monthKey) => (
-                    <option key={monthKey} value={monthKey}>
-                      {monthLabel(monthKey)}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                  Generate from history
+                </button>
+                <label className={styles.headerControl}>
+                  <span className={styles.controlLabel}>Show month</span>
+                  <select
+                    className={styles.select}
+                    disabled={Boolean(editingCap)}
+                    onChange={(event) => setVisibleCapMonth(event.target.value)}
+                    value={visibleCapMonth}
+                  >
+                    {capMonthOptions.map((monthKey) => (
+                      <option key={monthKey} value={monthKey}>
+                        {monthLabel(monthKey)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
             }
             eyebrow="Monthly caps"
             title={`${monthLabel(visibleCapMonth)} cap coverage`}
           >
+            <div className={styles.helperText}>
+              Generated caps use variable expense history only. Rent and recurring fixed bills
+              stay in recurring rules so planned totals do not double-count them.
+            </div>
             <div className={styles.statGrid}>
               <div className={styles.statBlock}>
                 <div className={styles.statLabel}>Cap total</div>
