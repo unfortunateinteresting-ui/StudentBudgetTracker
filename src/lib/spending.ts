@@ -10,6 +10,19 @@ const entryText = (entry: LedgerEntry) => `${entry.label} ${entry.category} ${en
 export const isRentExpense = (entry: LedgerEntry) =>
   entry.entry_kind === "expense" && isRentLike(entryText(entry));
 
+export const categoryKey = (category: string) => category.trim().toLowerCase();
+
+export function categorySpendValue(totals: Map<string, number>, category: string) {
+  const target = categoryKey(category);
+  let total = 0;
+  totals.forEach((value, key) => {
+    if (categoryKey(key) === target) {
+      total += value;
+    }
+  });
+  return total;
+}
+
 export function netSpendingTotal(entries: LedgerEntry[]) {
   let nonRentExpense = 0;
   let rentExpense = 0;

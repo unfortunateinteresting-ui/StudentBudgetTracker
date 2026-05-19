@@ -107,6 +107,9 @@ export interface InsightSnapshot {
   total_available_cash: number;
   this_month_spend: number;
   this_month_cap: number;
+  this_month_capped_spend: number;
+  this_month_uncapped_spend: number;
+  this_month_cap_remaining: number;
   spending_to_date: number;
   average_monthly_spend: number;
   planned_remaining_spending: number;

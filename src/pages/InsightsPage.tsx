@@ -63,10 +63,12 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
         />
         <MetricCard
           eyebrow="Current month"
-          note={`Cap ${currency(snapshot.this_month_cap)} against current spend.`}
+          note={`Total net spend ${currency(snapshot.this_month_spend)}. Uncapped spend ${currency(
+            snapshot.this_month_uncapped_spend,
+          )}.`}
           onWhy={() => onWhy("this_month_spend")}
-          title="This month spent"
-          value={currency(snapshot.this_month_spend)}
+          title="Capped spend"
+          value={`${currency(snapshot.this_month_capped_spend)} / ${currency(snapshot.this_month_cap)}`}
         />
         <MetricCard
           eyebrow="Planning"

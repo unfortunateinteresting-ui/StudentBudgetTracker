@@ -1365,6 +1365,63 @@ fn net_category_spending<'a>(
     totals
 }
 
+fn category_key(category: &str) -> String {
+    category.trim().to_lowercase()
+}
+
+#[derive(Debug, Default)]
+struct MonthCapHealth {
+    cap_total: f64,
+    capped_spend: f64,
+    uncapped_spend: f64,
+    cap_remaining: f64,
+}
+
+fn cap_health_for_month(
+    entries: &[LedgerEntry],
+    caps: &[MonthlyCap],
+    month: &str,
+) -> MonthCapHealth {
+    let month_entries = entries
+        .iter()
+        .filter(|entry| month_key(&entry.occurred_at_local) == Some(month))
+        .collect::<Vec<_>>();
+    let month_total = net_spending_total(month_entries.iter().copied());
+    let category_totals = net_category_spending(month_entries.iter().copied());
+    let mut normalized_category_totals: HashMap<String, f64> = HashMap::new();
+    for (category, value) in category_totals {
+        *normalized_category_totals
+            .entry(category_key(&category))
+            .or_insert(0.0) += value;
+    }
+
+    let mut cap_totals_by_category: HashMap<String, f64> = HashMap::new();
+    for cap in caps.iter().filter(|cap| cap.month_key == month) {
+        *cap_totals_by_category
+            .entry(category_key(&cap.category))
+            .or_insert(0.0) += cap.amount;
+    }
+
+    let cap_total = cap_totals_by_category.values().sum::<f64>();
+    let mut capped_spend = 0.0;
+    let mut cap_remaining = 0.0;
+    for (category, cap_total_for_category) in &cap_totals_by_category {
+        let spend = normalized_category_totals
+            .get(category)
+            .copied()
+            .unwrap_or(0.0);
+        capped_spend += spend;
+        cap_remaining += (cap_total_for_category - spend).max(0.0);
+    }
+
+    MonthCapHealth {
+        cap_total,
+        capped_spend,
+        uncapped_spend: (month_total - capped_spend).max(0.0),
+        cap_remaining,
+    }
+}
+
 fn is_rent_rule(rule: &RecurringRule) -> bool {
     is_rent_like(&format!("{} {} {}", rule.label, rule.category, rule.notes))
 }
@@ -3275,11 +3332,12 @@ fn calculate_snapshot_with_query(
         .map(|account| account.current_balance)
         .sum::<f64>();
     let this_month_spend = net_spending_for_month(&filtered_entries, &query.focus_month);
-    let this_month_cap = filtered_caps
-        .iter()
-        .filter(|cap| cap.month_key == query.focus_month)
-        .map(|cap| cap.amount)
-        .sum::<f64>();
+    let focus_month_cap_health =
+        cap_health_for_month(&filtered_entries, &filtered_caps, &query.focus_month);
+    let this_month_cap = focus_month_cap_health.cap_total;
+    let this_month_capped_spend = focus_month_cap_health.capped_spend;
+    let this_month_uncapped_spend = focus_month_cap_health.uncapped_spend;
+    let this_month_cap_remaining = focus_month_cap_health.cap_remaining;
 
     let range_end = query
         .range_months
@@ -3290,7 +3348,8 @@ fn calculate_snapshot_with_query(
     let remaining_window_start = query.reference_date.max(today_local());
     let current_month = current_month_key();
     let current_month_start = parse_month_start(&current_month)?;
-    let current_month_spend = net_spending_for_month(&filtered_entries, &current_month);
+    let current_month_cap_health =
+        cap_health_for_month(&filtered_entries, &filtered_caps, &current_month);
 
     let spending_to_date = net_spending_total(
         range_entries
@@ -3347,17 +3406,13 @@ fn calculate_snapshot_with_query(
         .range_months
         .iter()
         .map(|month| {
-            let cap_total = filtered_caps
-                .iter()
-                .filter(|cap| cap.month_key == *month)
-                .map(|cap| cap.amount)
-                .sum::<f64>();
+            let cap_health = cap_health_for_month(&filtered_entries, &filtered_caps, month);
             if month.as_str() < current_month.as_str() {
                 0.0
             } else if month == &current_month {
-                (cap_total - current_month_spend).max(0.0)
+                cap_health.cap_remaining
             } else {
-                cap_total
+                cap_health.cap_total
             }
         })
         .sum::<f64>();
@@ -3371,7 +3426,7 @@ fn calculate_snapshot_with_query(
 
     let focus_month_start = parse_month_start(&query.focus_month)?;
     let focus_month_end = end_of_month(focus_month_start);
-    let rent_due_this_month = active_rules
+    let scheduled_rent_due_this_month = active_rules
         .iter()
         .filter(|rule| {
             rule.status != RecurringStatus::Paused
@@ -3409,6 +3464,7 @@ fn calculate_snapshot_with_query(
         .map(|entry| entry.amount)
         .sum::<f64>();
     let rent_net_this_month = (rent_paid_this_month - rent_credit_this_month).max(0.0);
+    let rent_due_this_month = scheduled_rent_due_this_month.max(rent_paid_this_month);
 
     let upcoming_obligations = active_rules
         .iter()
@@ -3541,11 +3597,8 @@ fn calculate_snapshot_with_query(
         let month_start = parse_month_start(month)?;
         let month_end = end_of_month(month_start);
         let spent = net_spending_for_month(&filtered_entries, month);
-        let cap_total = filtered_caps
-            .iter()
-            .filter(|cap| cap.month_key == *month)
-            .map(|cap| cap.amount)
-            .sum::<f64>();
+        let cap_health = cap_health_for_month(&filtered_entries, &filtered_caps, month);
+        let cap_total = cap_health.cap_total;
 
         let runway_balance = if month_start < current_month_start {
             opening_balance_total
@@ -3567,7 +3620,7 @@ fn calculate_snapshot_with_query(
             let fixed_remaining =
                 scheduled_fixed_net_total(active_rules.iter(), due_from, month_end)?;
             let cap_remaining = if month_start == current_month_start {
-                (cap_total - current_month_spend).max(0.0)
+                current_month_cap_health.cap_remaining
             } else {
                 cap_total
             };
@@ -3603,9 +3656,14 @@ fn calculate_snapshot_with_query(
     breakdowns.insert(
         "this_month_spend".to_string(),
         build_lines(vec![
-            format!("This month expense total = {}", this_month_spend),
+            format!("This month net spend = {}", this_month_spend),
             "Rent credit is subtracted from rent only; rent never goes below zero.".to_string(),
             format!("This month cap total = {}", this_month_cap),
+            format!("Capped category spend = {}", this_month_capped_spend),
+            format!("Uncapped spend = {}", this_month_uncapped_spend),
+            format!("Remaining cap room = {}", this_month_cap_remaining),
+            "Cap room is calculated per category; uncapped categories do not consume cap room."
+                .to_string(),
             "Excluded entries are ignored here.".to_string(),
         ]),
     );
@@ -3627,6 +3685,8 @@ fn calculate_snapshot_with_query(
             format!("Spending to date = {}", spending_to_date),
             format!("Remaining fixed bills = {}", remaining_fixed_bills),
             format!("Remaining monthly caps = {}", remaining_caps),
+            "Current-month caps use remaining room per category; future months use full caps."
+                .to_string(),
             format!(
                 "Planned remaining spending = {}",
                 planned_remaining_spending
@@ -3672,6 +3732,8 @@ fn calculate_snapshot_with_query(
             format!("Total available cash = {}", total_available_cash),
             format!("Remaining fixed bills = {}", remaining_fixed_bills),
             format!("Remaining monthly caps = {}", remaining_caps),
+            "Current-month caps use remaining room per category; uncapped spend is not subtracted twice."
+                .to_string(),
             format!(
                 "Projected end balance for the planning window = {}",
                 projected_end_of_year_cushion
@@ -3691,6 +3753,9 @@ fn calculate_snapshot_with_query(
         total_available_cash,
         this_month_spend,
         this_month_cap,
+        this_month_capped_spend,
+        this_month_uncapped_spend,
+        this_month_cap_remaining,
         spending_to_date,
         average_monthly_spend,
         planned_remaining_spending,
@@ -7285,6 +7350,7 @@ mod tests {
         assert_eq!(snapshot.rent_paid_this_month, 1000.0);
         assert_eq!(snapshot.rent_credit_this_month, 400.0);
         assert_eq!(snapshot.rent_net_this_month, 600.0);
+        assert_eq!(snapshot.rent_due_this_month, 1000.0);
         assert_eq!(snapshot.this_month_spend, 650.0);
         assert_eq!(snapshot.spending_to_date, 650.0);
         assert_eq!(snapshot.monthly_series[0].spent, 650.0);
@@ -7298,6 +7364,106 @@ mod tests {
             .category_average_spend
             .iter()
             .any(|point| point.label == "rent" && point.value == 600.0));
+    }
+
+    #[test]
+    fn cap_room_is_calculated_by_category_not_total_month_spend() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let current_month = current_month_key();
+        let current_month_start = parse_month_start(&current_month).unwrap();
+        update_settings_row(
+            &conn,
+            &AppSettings {
+                school_year_start_month: current_month_start.month(),
+                planning_start_month_key: current_month.clone(),
+                school_year_months: 1,
+                language: "EN".into(),
+                backup_retention: 50,
+                last_migration_version: 2,
+            },
+        )
+        .unwrap();
+
+        insert_account_raw(
+            &conn,
+            &Account {
+                id: "account-a".into(),
+                name: "Checking".into(),
+                r#type: AccountType::Checking,
+                opening_balance: 1000.0,
+                archived: false,
+                created_at: "2026-01-01T09:00:00".into(),
+                current_balance: 1000.0,
+            },
+        )
+        .unwrap();
+        insert_entry_raw(
+            &conn,
+            &LedgerEntry {
+                id: "rent-expense".into(),
+                account_id: "account-a".into(),
+                entry_kind: EntryKind::Expense,
+                amount: 800.0,
+                occurred_at_local: date_to_occurrence_iso(current_month_start),
+                label: "Rent".into(),
+                category: "rent".into(),
+                notes: "".into(),
+                recurring_rule_id: None,
+                transfer_group_id: None,
+                exclude_from_insights: false,
+            },
+        )
+        .unwrap();
+        insert_entry_raw(
+            &conn,
+            &LedgerEntry {
+                id: "food-expense".into(),
+                account_id: "account-a".into(),
+                entry_kind: EntryKind::Expense,
+                amount: 60.0,
+                occurred_at_local: date_to_occurrence_iso(current_month_start),
+                label: "Groceries".into(),
+                category: "Food".into(),
+                notes: "".into(),
+                recurring_rule_id: None,
+                transfer_group_id: None,
+                exclude_from_insights: false,
+            },
+        )
+        .unwrap();
+        insert_cap_raw(
+            &conn,
+            &MonthlyCap {
+                id: "food-cap".into(),
+                category: "food".into(),
+                amount: 100.0,
+                month_key: current_month.clone(),
+            },
+        )
+        .unwrap();
+        insert_cap_raw(
+            &conn,
+            &MonthlyCap {
+                id: "school-cap".into(),
+                category: "school".into(),
+                amount: 50.0,
+                month_key: current_month.clone(),
+            },
+        )
+        .unwrap();
+
+        let snapshot = calculate_snapshot(&conn).unwrap();
+
+        assert_eq!(snapshot.this_month_spend, 860.0);
+        assert_eq!(snapshot.this_month_cap, 150.0);
+        assert_eq!(snapshot.this_month_capped_spend, 60.0);
+        assert_eq!(snapshot.this_month_uncapped_spend, 800.0);
+        assert_eq!(snapshot.this_month_cap_remaining, 90.0);
+        assert_eq!(snapshot.planned_remaining_spending, 90.0);
+        assert_eq!(snapshot.projected_end_of_year_cushion, 50.0);
+        assert_eq!(snapshot.monthly_series[0].runway_balance, 50.0);
     }
 
     #[test]

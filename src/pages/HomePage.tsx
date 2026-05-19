@@ -67,10 +67,12 @@ export function HomePage({
         />
         <MetricCard
           eyebrow="This month"
-          note={`Cap ${currency(snapshot.this_month_cap)} vs spend ${currency(snapshot.this_month_spend)}.`}
+          note={`Total net spend ${currency(snapshot.this_month_spend)}. Remaining cap room ${currency(
+            snapshot.this_month_cap_remaining,
+          )}.`}
           onWhy={() => onWhy("this_month_spend")}
-          title="This month spent"
-          value={`${currency(snapshot.this_month_spend)} / ${currency(snapshot.this_month_cap)}`}
+          title="Capped spend"
+          value={`${currency(snapshot.this_month_capped_spend)} / ${currency(snapshot.this_month_cap)}`}
         />
         <MetricCard
           eyebrow="Planning"

@@ -9,7 +9,7 @@ import {
   updateRecurringRule,
 } from "../lib/api";
 import { currentMonthKey, currency, monthLabel, shiftMonthKey } from "../lib/format";
-import { netSpendingByCategory } from "../lib/spending";
+import { categorySpendValue, netSpendingByCategory, netSpendingTotal } from "../lib/spending";
 import { categoryOptions } from "../lib/suggestions";
 import type {
   Account,
@@ -204,6 +204,11 @@ export function PlanPage({
     return netSpendingByCategory(monthEntries);
   }, [activityByMonth, visibleCapMonth]);
 
+  const visibleMonthNetSpend = useMemo(() => {
+    const monthEntries = activityByMonth.get(visibleCapMonth)?.entries ?? [];
+    return netSpendingTotal(monthEntries);
+  }, [activityByMonth, visibleCapMonth]);
+
   const visibleMonthCapTotal = useMemo(
     () =>
       visibleMonthCaps.reduce((sum, item) => {
@@ -215,12 +220,16 @@ export function PlanPage({
   const visibleMonthSpendTotal = useMemo(
     () =>
       visibleMonthCaps.reduce((sum, item) => {
-        return sum + (visibleMonthSpendByCategory.get(item.category) ?? 0);
+        return sum + categorySpendValue(visibleMonthSpendByCategory, item.category);
       }, 0),
     [visibleMonthCaps, visibleMonthSpendByCategory],
   );
 
-  const visibleMonthCapRoom = visibleMonthCapTotal - visibleMonthSpendTotal;
+  const visibleMonthRemainingRoom = visibleMonthCaps.reduce((sum, item) => {
+    const spent = categorySpendValue(visibleMonthSpendByCategory, item.category);
+    return sum + Math.max(item.amount - spent, 0);
+  }, 0);
+  const visibleMonthUncappedSpend = Math.max(visibleMonthNetSpend - visibleMonthSpendTotal, 0);
 
   const upcomingObligationTotal = useMemo(
     () =>
@@ -884,18 +893,18 @@ export function PlanPage({
                 <div className={styles.statValue}>{currency(visibleMonthSpendTotal)}</div>
               </div>
               <div className={styles.statBlock}>
-                <div className={styles.statLabel}>Remaining room</div>
+                <div className={styles.statLabel}>Remaining cap room</div>
                 <div
                   className={`${styles.statValue} ${
-                    visibleMonthCapRoom >= 0 ? styles.positive : styles.negative
+                    visibleMonthRemainingRoom >= 0 ? styles.positive : styles.negative
                   }`}
                 >
-                  {currency(visibleMonthCapRoom)}
+                  {currency(visibleMonthRemainingRoom)}
                 </div>
               </div>
               <div className={styles.statBlock}>
-                <div className={styles.statLabel}>Categories</div>
-                <div className={styles.statValue}>{visibleMonthCaps.length}</div>
+                <div className={styles.statLabel}>Uncapped spend</div>
+                <div className={styles.statValue}>{currency(visibleMonthUncappedSpend)}</div>
               </div>
             </div>
 
@@ -913,7 +922,7 @@ export function PlanPage({
                 <tbody>
                   {visibleMonthCaps.length ? (
                     visibleMonthCaps.map((item) => {
-                      const spent = visibleMonthSpendByCategory.get(item.category) ?? 0;
+                      const spent = categorySpendValue(visibleMonthSpendByCategory, item.category);
                       const variance = item.amount - spent;
                       return (
                         <tr key={item.id}>
