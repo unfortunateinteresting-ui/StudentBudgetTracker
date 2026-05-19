@@ -86,12 +86,16 @@ export interface UpcomingObligation {
 export interface ChartPoint {
   label: string;
   value: number;
+  color?: string;
 }
 
 export interface MonthlySeriesPoint {
   month_key: string;
   spent: number;
   cap: number;
+  planned_spend: number;
+  predicted_spend: number;
+  phase: "actual" | "current" | "future";
   runway_balance: number;
 }
 

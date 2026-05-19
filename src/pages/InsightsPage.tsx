@@ -37,11 +37,12 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
   })[0];
   const monthlySpendBars = useMemo(
     () =>
-      snapshot.monthly_spending_totals.map((point) => ({
-        ...point,
-        label: monthLabel(point.label),
+      snapshot.monthly_series.map((point) => ({
+        label: monthLabel(point.month_key),
+        value: point.phase === "actual" ? point.spent : point.planned_spend,
+        color: point.phase === "actual" ? "var(--color-forest)" : "var(--color-planned)",
       })),
-    [snapshot.monthly_spending_totals],
+    [snapshot.monthly_series],
   );
 
   return (
@@ -224,6 +225,8 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
               <tr>
                 <th>Month</th>
                 <th>Net spend</th>
+                <th>Planned</th>
+                <th>Predicted</th>
                 <th>Ledger net</th>
                 <th>Funding</th>
                 <th>Rent credit</th>
@@ -237,6 +240,8 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
                   <tr key={row.month_key}>
                     <td>{monthLabel(row.month_key)}</td>
                     <td>{currency(row.spent)}</td>
+                    <td>{currency(row.planned_spend)}</td>
+                    <td>{currency(row.predicted_spend)}</td>
                     <td>{currency(row.net_spend)}</td>
                     <td>{currency(row.funding)}</td>
                     <td>{currency(row.rent_credit)}</td>
@@ -246,7 +251,7 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
                 ))
               ) : (
                 <tr>
-                  <td className={styles.emptyState} colSpan={7}>
+                  <td className={styles.emptyState} colSpan={9}>
                     No monthly insight rows available yet.
                   </td>
                 </tr>

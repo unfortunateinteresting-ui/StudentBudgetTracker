@@ -33,11 +33,12 @@ export function HomePage({
   );
   const monthlySpendBars = useMemo(
     () =>
-      snapshot.monthly_spending_totals.map((point) => ({
-        ...point,
-        label: monthLabel(point.label),
+      snapshot.monthly_series.map((point) => ({
+        label: monthLabel(point.month_key),
+        value: point.phase === "actual" ? point.spent : point.planned_spend,
+        color: point.phase === "actual" ? "var(--color-forest)" : "var(--color-planned)",
       })),
-    [snapshot.monthly_spending_totals],
+    [snapshot.monthly_series],
   );
 
   return (

@@ -120,6 +120,9 @@ pub struct MonthlySeriesPoint {
     pub month_key: String,
     pub spent: f64,
     pub cap: f64,
+    pub planned_spend: f64,
+    pub predicted_spend: f64,
+    pub phase: String,
     pub runway_balance: f64,
 }
 

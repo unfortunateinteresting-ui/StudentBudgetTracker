@@ -13,6 +13,8 @@
   --color-muted: rgba(23, 25, 20, 0.65);
   --color-clay: #d8926d;
   --color-forest: #739765;
+  --color-planned: #739765;
+  --color-predicted: #4d7895;
   --color-app-shell-top: #223329;
   --color-app-shell-bottom: #efe8dc;
   --color-html-bg: #24362b;
@@ -67,6 +69,8 @@
   --color-muted: rgba(237, 244, 236, 0.68);
   --color-clay: #e1a27d;
   --color-forest: #8fb887;
+  --color-planned: #8fb887;
+  --color-predicted: #8fb8d1;
   --color-app-shell-top: #101814;
   --color-app-shell-bottom: #0f1412;
   --color-html-bg: #0c1110;

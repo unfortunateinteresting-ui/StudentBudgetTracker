@@ -57,6 +57,7 @@ export function BarChart({ data, color = "var(--color-clay)" }: BarChartProps) {
                   {data.map((item) => {
                     const bandY = yScale(item.label) ?? 0;
                     const bandHeight = yScale.bandwidth();
+                    const barColor = item.color ?? color;
                     const barWidth = Math.max(xScale(item.value), 0);
                     const showInsideLabel = barWidth > innerWidth * 0.72;
                     const labelX = showInsideLabel
@@ -74,7 +75,7 @@ export function BarChart({ data, color = "var(--color-clay)" }: BarChartProps) {
                           y={bandY}
                         />
                         <Bar
-                          fill={color}
+                          fill={barColor}
                           height={bandHeight}
                           rx={10}
                           width={barWidth}

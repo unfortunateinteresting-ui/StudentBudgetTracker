@@ -3638,9 +3638,17 @@ fn calculate_snapshot_with_query(
         let spent = net_spending_for_month(&filtered_entries, month);
         let cap_health = cap_health_for_month(&filtered_entries, &filtered_caps, month);
         let cap_total = cap_health.cap_total;
+        let phase = if month_start < current_month_start {
+            "actual"
+        } else if month_start == current_month_start {
+            "current"
+        } else {
+            "future"
+        };
 
-        let runway_balance = if month_start < current_month_start {
-            opening_balance_total
+        let (planned_spend, predicted_spend, runway_balance) = if month_start < current_month_start
+        {
+            let runway_balance = opening_balance_total
                 + balance_entries
                     .iter()
                     .filter_map(|entry| {
@@ -3649,7 +3657,8 @@ fn calculate_snapshot_with_query(
                             .filter(|entry_date| *entry_date <= month_end)
                             .map(|_| entry_balance_effect(entry))
                     })
-                    .sum::<f64>()
+                    .sum::<f64>();
+            (spent, spent, runway_balance)
         } else {
             let due_from = if month_start == current_month_start {
                 query.reference_date.max(month_start)
@@ -3663,14 +3672,24 @@ fn calculate_snapshot_with_query(
             } else {
                 cap_total
             };
+            let variable_prediction = if month_start == current_month_start {
+                current_variable_remaining
+            } else {
+                average_variable_spend
+            };
+            let planned_spend = spent + fixed_remaining + cap_remaining;
+            let predicted_spend = spent + fixed_remaining + variable_prediction;
             projected_balance -= fixed_remaining + cap_remaining;
-            projected_balance
+            (planned_spend, predicted_spend, projected_balance)
         };
 
         monthly_series.push(MonthlySeriesPoint {
             month_key: month.clone(),
             spent,
             cap: cap_total,
+            planned_spend,
+            predicted_spend,
+            phase: phase.to_string(),
             runway_balance,
         });
     }
@@ -3903,6 +3922,22 @@ fn breakdown_for_metric(
                 format!(
                     "Cap = {}",
                     month_point.map(|point| point.cap).unwrap_or(0.0)
+                ),
+                format!(
+                    "Planned spend = {}",
+                    month_point.map(|point| point.planned_spend).unwrap_or(0.0)
+                ),
+                format!(
+                    "Predicted spend = {}",
+                    month_point
+                        .map(|point| point.predicted_spend)
+                        .unwrap_or(0.0)
+                ),
+                format!(
+                    "Month phase = {}",
+                    month_point
+                        .map(|point| point.phase.clone())
+                        .unwrap_or_else(|| "unknown".to_string())
                 ),
                 format!(
                     "Runway balance = {}",
