@@ -434,6 +434,7 @@ export function PlanPage({
           eyebrow="Caps"
           note={`Current month cap total ${currency(snapshot.this_month_cap)}.`}
           title="Total caps"
+          valueTone="cap"
           value={currency(
             sortedCaps.reduce((sum, item) => {
               return sum + item.amount;
@@ -504,7 +505,7 @@ export function PlanPage({
                     <tr key={item.month_key}>
                       <td>{monthLabel(item.month_key)}</td>
                       <td>{currency(item.spent)}</td>
-                      <td>{currency(item.cap)}</td>
+                      <td className={styles.capValue}>{currency(item.cap)}</td>
                       <td className={capRoom >= 0 ? styles.positive : styles.negative}>
                         {currency(capRoom)}
                       </td>
@@ -886,7 +887,9 @@ export function PlanPage({
             <div className={styles.statGrid}>
               <div className={styles.statBlock}>
                 <div className={styles.statLabel}>Cap total</div>
-                <div className={styles.statValue}>{currency(visibleMonthCapTotal)}</div>
+                <div className={`${styles.statValue} ${styles.capValue}`}>
+                  {currency(visibleMonthCapTotal)}
+                </div>
               </div>
               <div className={styles.statBlock}>
                 <div className={styles.statLabel}>Capped spend</div>
@@ -927,7 +930,7 @@ export function PlanPage({
                       return (
                         <tr key={item.id}>
                           <td>{item.category}</td>
-                          <td>{currency(item.amount)}</td>
+                          <td className={styles.capValue}>{currency(item.amount)}</td>
                           <td>{currency(spent)}</td>
                           <td className={variance >= 0 ? styles.positive : styles.negative}>
                             {currency(variance)}

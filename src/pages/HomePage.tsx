@@ -36,7 +36,7 @@ export function HomePage({
       snapshot.monthly_series.map((point) => ({
         label: monthLabel(point.month_key),
         value: point.phase === "actual" ? point.spent : point.planned_spend,
-        color: point.phase === "actual" ? "var(--color-forest)" : "var(--color-planned)",
+        color: point.phase === "actual" ? "var(--color-clay)" : "var(--color-planned)",
       })),
     [snapshot.monthly_series],
   );
@@ -73,6 +73,7 @@ export function HomePage({
           )}.`}
           onWhy={() => onWhy("this_month_spend")}
           title="Capped spend"
+          valueTone="cap"
           value={`${currency(snapshot.this_month_capped_spend)} / ${currency(snapshot.this_month_cap)}`}
         />
         <MetricCard
@@ -104,6 +105,7 @@ export function HomePage({
           note={`Remaining planned spend ${currency(snapshot.planned_remaining_spending)}.`}
           onWhy={() => onWhy("planned_total_spending")}
           title="Planned total spending"
+          valueTone="planned"
           value={currency(snapshot.planned_total_spending)}
         />
         <MetricCard
@@ -111,6 +113,7 @@ export function HomePage({
           note={`Remaining predicted spend ${currency(snapshot.predicted_remaining_spending)}.`}
           onWhy={() => onWhy("predicted_total_spending")}
           title="Predicted total spending"
+          valueTone="predicted"
           value={currency(snapshot.predicted_total_spending)}
         />
       </div>
@@ -172,7 +175,7 @@ export function HomePage({
 
       <div className={styles.grid2}>
         <SectionCard eyebrow="School year" title="Spending by month">
-          <BarChart color="var(--color-forest)" data={monthlySpendBars} />
+          <BarChart color="var(--color-clay)" data={monthlySpendBars} />
         </SectionCard>
         <SectionCard eyebrow="School year" title="Average spend by category">
           <BarChart data={snapshot.category_average_spend} />

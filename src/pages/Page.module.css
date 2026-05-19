@@ -420,6 +420,21 @@
   background: var(--color-badge-paused-bg);
 }
 
+.plannedValue {
+  color: var(--color-planned);
+  font-weight: 700;
+}
+
+.predictedValue {
+  color: var(--color-predicted);
+  font-weight: 700;
+}
+
+.capValue {
+  color: var(--color-cap);
+  font-weight: 700;
+}
+
 @media (max-width: 1080px) {
   .grid4 {
     grid-template-columns: repeat(2, minmax(0, 1fr));

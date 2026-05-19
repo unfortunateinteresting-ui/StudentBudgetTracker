@@ -40,7 +40,7 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
       snapshot.monthly_series.map((point) => ({
         label: monthLabel(point.month_key),
         value: point.phase === "actual" ? point.spent : point.planned_spend,
-        color: point.phase === "actual" ? "var(--color-forest)" : "var(--color-planned)",
+        color: point.phase === "actual" ? "var(--color-clay)" : "var(--color-planned)",
       })),
     [snapshot.monthly_series],
   );
@@ -69,6 +69,7 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
           )}.`}
           onWhy={() => onWhy("this_month_spend")}
           title="Capped spend"
+          valueTone="cap"
           value={`${currency(snapshot.this_month_capped_spend)} / ${currency(snapshot.this_month_cap)}`}
         />
         <MetricCard
@@ -93,6 +94,7 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
           note={`Remaining planned spend ${currency(snapshot.planned_remaining_spending)}.`}
           onWhy={() => onWhy("planned_total_spending")}
           title="Planned total spending"
+          valueTone="planned"
           value={currency(snapshot.planned_total_spending)}
         />
         <MetricCard
@@ -100,6 +102,7 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
           note={`Remaining predicted spend ${currency(snapshot.predicted_remaining_spending)}.`}
           onWhy={() => onWhy("predicted_total_spending")}
           title="Predicted total spending"
+          valueTone="predicted"
           value={currency(snapshot.predicted_total_spending)}
         />
       </div>
@@ -129,7 +132,7 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
           <LineChart data={snapshot.monthly_series} />
         </SectionCard>
         <SectionCard eyebrow="School year" title="Spending by month">
-          <BarChart color="var(--color-forest)" data={monthlySpendBars} />
+          <BarChart color="var(--color-clay)" data={monthlySpendBars} />
         </SectionCard>
       </div>
 
@@ -240,12 +243,12 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
                   <tr key={row.month_key}>
                     <td>{monthLabel(row.month_key)}</td>
                     <td>{currency(row.spent)}</td>
-                    <td>{currency(row.planned_spend)}</td>
-                    <td>{currency(row.predicted_spend)}</td>
+                    <td className={styles.plannedValue}>{currency(row.planned_spend)}</td>
+                    <td className={styles.predictedValue}>{currency(row.predicted_spend)}</td>
                     <td>{currency(row.net_spend)}</td>
                     <td>{currency(row.funding)}</td>
                     <td>{currency(row.rent_credit)}</td>
-                    <td>{currency(row.cap)}</td>
+                    <td className={styles.capValue}>{currency(row.cap)}</td>
                     <td>{currency(row.runway_balance)}</td>
                   </tr>
                 ))

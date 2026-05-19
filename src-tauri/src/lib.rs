@@ -444,6 +444,37 @@ fn collect_sync_network_targets() -> (Vec<String>, Vec<SocketAddr>) {
     )
 }
 
+fn bind_lan_discovery_request_socket() -> AppResult<UdpSocket> {
+    match UdpSocket::bind(("0.0.0.0", 0)) {
+        Ok(socket) => return Ok(socket),
+        Err(err) => {
+            let mut bind_errors = vec![format!("0.0.0.0:0 -> {err}")];
+            if let Ok(interfaces) = get_if_addrs() {
+                for interface in interfaces {
+                    if !is_candidate_sync_interface(&interface.name) {
+                        continue;
+                    }
+                    let IfAddr::V4(v4) = interface.addr else {
+                        continue;
+                    };
+                    if !is_candidate_sync_ipv4(v4.ip) {
+                        continue;
+                    }
+                    match UdpSocket::bind(SocketAddr::from((v4.ip, 0))) {
+                        Ok(socket) => return Ok(socket),
+                        Err(err) => bind_errors.push(format!("{}:0 -> {err}", v4.ip)),
+                    }
+                }
+            }
+
+            Err(anyhow!(
+                "Failed to bind a UDP discovery socket. Tried: {}. This usually means Windows, VPN/security software, or the network adapter is blocking UDP sockets for this app.",
+                bind_errors.join("; ")
+            ))
+        }
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -5003,8 +5034,7 @@ fn discover_lan_peers_internal(state: &AppState) -> AppResult<Vec<LanPeerCandida
     let local_identity = fetch_sync_device_identity(&conn)?;
     drop(conn);
 
-    let socket =
-        UdpSocket::bind(("0.0.0.0", 0)).context("Failed to bind a UDP discovery socket.")?;
+    let socket = bind_lan_discovery_request_socket()?;
     socket.set_broadcast(true)?;
     socket.set_read_timeout(Some(StdDuration::from_millis(350)))?;
 

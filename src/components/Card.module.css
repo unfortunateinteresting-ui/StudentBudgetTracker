@@ -49,6 +49,22 @@
   line-height: 0.95;
 }
 
+.metricValue_default {
+  color: var(--color-ink);
+}
+
+.metricValue_cap {
+  color: var(--color-cap);
+}
+
+.metricValue_planned {
+  color: var(--color-planned);
+}
+
+.metricValue_predicted {
+  color: var(--color-predicted);
+}
+
 .metricNote {
   color: var(--color-muted);
   font-size: 0.92rem;
