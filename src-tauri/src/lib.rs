@@ -168,6 +168,7 @@ struct RuntimeState {
     recovery_notice: Option<String>,
     undo_stack: Vec<UndoAction>,
     inbox_watch_active: bool,
+    lan_discovery_available: bool,
     lan_direct_available: bool,
     lan_sync_port: Option<u16>,
 }
@@ -359,6 +360,25 @@ fn is_candidate_sync_ipv4(ip: Ipv4Addr) -> bool {
     !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified()
 }
 
+fn is_candidate_sync_interface(name: &str) -> bool {
+    let name = name.to_lowercase();
+    ![
+        "vpn",
+        "virtual",
+        "virtualbox",
+        "vmware",
+        "veth",
+        "vethernet",
+        "hyper-v",
+        "bluetooth",
+        "loopback",
+        "tailscale",
+        "zerotier",
+    ]
+    .iter()
+    .any(|marker| name.contains(marker))
+}
+
 fn broadcast_address_for_ipv4(ip: Ipv4Addr, netmask: Ipv4Addr) -> Ipv4Addr {
     Ipv4Addr::from(u32::from(ip) | !u32::from(netmask))
 }
@@ -397,6 +417,9 @@ fn collect_sync_network_targets() -> (Vec<String>, Vec<SocketAddr>) {
 
     if let Ok(interfaces) = get_if_addrs() {
         for interface in interfaces {
+            if !is_candidate_sync_interface(&interface.name) {
+                continue;
+            }
             let IfAddr::V4(v4) = interface.addr else {
                 continue;
             };
@@ -974,8 +997,16 @@ fn spawn_sync_inbox_watcher(app_handle: AppHandle) {
 fn spawn_lan_discovery_service(app_handle: AppHandle) {
     thread::spawn(move || {
         let socket = match UdpSocket::bind(("0.0.0.0", SYNC_DISCOVERY_PORT)) {
-            Ok(socket) => socket,
+            Ok(socket) => {
+                set_service_runtime_flags(&app_handle, |runtime| {
+                    runtime.lan_discovery_available = true;
+                });
+                socket
+            }
             Err(err) => {
+                set_service_runtime_flags(&app_handle, |runtime| {
+                    runtime.lan_discovery_available = false;
+                });
                 emit_sync_attention(
                     &app_handle,
                     &format!(
@@ -990,7 +1021,13 @@ fn spawn_lan_discovery_service(app_handle: AppHandle) {
         loop {
             let (bytes, sender) = match socket.recv_from(&mut buffer) {
                 Ok(values) => values,
-                Err(_) => continue,
+                Err(err) => {
+                    emit_sync_attention(
+                        &app_handle,
+                        &format!("LAN discovery responder error: {err}"),
+                    );
+                    continue;
+                }
             };
             let request: LanDiscoveryRequest = match serde_json::from_slice(&buffer[..bytes]) {
                 Ok(request) => request,
@@ -1851,10 +1888,11 @@ fn fetch_local_sync_state(conn: &Connection, state: &AppState) -> AppResult<Loca
     let (local_ipv4_addresses, _) = collect_sync_network_targets();
     let localsend_path = find_localsend_executable().map(|path| path.to_string_lossy().to_string());
     let inbox_packet_count = list_sync_packet_files(&sync_inbox_dir(&env))?.len() as u32;
-    let (inbox_watch_active, lan_direct_available, lan_sync_port) =
+    let (inbox_watch_active, lan_discovery_available, lan_direct_available, lan_sync_port) =
         with_runtime_state(state, |runtime| {
             (
                 runtime.inbox_watch_active,
+                runtime.lan_discovery_available,
                 runtime.lan_direct_available,
                 runtime.lan_sync_port,
             )
@@ -1909,6 +1947,7 @@ fn fetch_local_sync_state(conn: &Connection, state: &AppState) -> AppResult<Loca
         localsend_available: localsend_path.is_some(),
         localsend_path,
         inbox_watch_active,
+        lan_discovery_available,
         lan_direct_available,
         lan_sync_port,
         sync_inbox_path: sync_inbox_dir(env).to_string_lossy().to_string(),

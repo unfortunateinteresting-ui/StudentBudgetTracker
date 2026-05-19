@@ -61,6 +61,7 @@ const localSync = {
   localsend_available: true,
   localsend_path: "C:\\Program Files\\LocalSend\\localsend_app.exe",
   inbox_watch_active: true,
+  lan_discovery_available: true,
   lan_direct_available: true,
   lan_sync_port: 38256,
   sync_inbox_path: "C:\\Users\\mouzzia\\AppData\\Roaming\\StudentBudgetTracker\\sync-inbox",

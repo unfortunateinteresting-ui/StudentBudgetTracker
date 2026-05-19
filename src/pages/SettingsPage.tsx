@@ -587,6 +587,12 @@ export function SettingsPage({
                 </span>
               </div>
               <div className={styles.summaryRow}>
+                <span>LAN discovery</span>
+                <span className={styles.inlineValue}>
+                  {localSync.lan_discovery_available ? "Ready on port 38255" : "Unavailable"}
+                </span>
+              </div>
+              <div className={styles.summaryRow}>
                 <span>Direct LAN sync</span>
                 <span className={styles.inlineValue}>
                   {localSync.lan_direct_available
@@ -703,11 +709,18 @@ export function SettingsPage({
               ) : (
                 <div className={styles.emptyPanel}>
                   <strong>No detected devices yet</strong>
+                  {!localSync.lan_discovery_available ? (
+                    <div className={styles.minor}>
+                      LAN discovery is not active on this device. Fully close and reopen the app,
+                      then check this section again.
+                    </div>
+                  ) : null}
                   <div className={styles.minor}>
                     Keep the app open on the other device, then click <strong>Refresh devices</strong>.
                   </div>
                   <div className={styles.minor}>
-                    If nothing appears, use the manual address fallback below.
+                    If nothing appears, allow UDP 38255 and TCP 38256 through Windows Firewall on
+                    both devices, then use the manual address fallback below if needed.
                   </div>
                 </div>
               )}

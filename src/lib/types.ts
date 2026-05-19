@@ -174,6 +174,7 @@ export interface LocalSyncState {
   localsend_available: boolean;
   localsend_path?: string | null;
   inbox_watch_active: boolean;
+  lan_discovery_available: boolean;
   lan_direct_available: boolean;
   lan_sync_port?: number | null;
   sync_inbox_path: string;

@@ -209,6 +209,7 @@ pub struct LocalSyncState {
     pub localsend_available: bool,
     pub localsend_path: Option<String>,
     pub inbox_watch_active: bool,
+    pub lan_discovery_available: bool,
     pub lan_direct_available: bool,
     pub lan_sync_port: Option<u16>,
     pub sync_inbox_path: String,
