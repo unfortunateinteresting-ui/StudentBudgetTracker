@@ -1427,35 +1427,8 @@ fn gross_expense_for_month(entries: &[LedgerEntry], month: &str) -> f64 {
         .sum()
 }
 
-fn funding_for_month(entries: &[LedgerEntry], month: &str) -> f64 {
-    entries
-        .iter()
-        .filter(|entry| {
-            !entry.exclude_from_insights
-                && entry.entry_kind == EntryKind::Funding
-                && month_key(&entry.occurred_at_local) == Some(month)
-        })
-        .map(|entry| entry.amount.abs())
-        .sum()
-}
-
-fn rent_credit_for_month(entries: &[LedgerEntry], month: &str) -> f64 {
-    entries
-        .iter()
-        .filter(|entry| {
-            !entry.exclude_from_insights
-                && entry.entry_kind == EntryKind::RentCredit
-                && month_key(&entry.occurred_at_local) == Some(month)
-        })
-        .map(|entry| entry.amount.abs())
-        .sum()
-}
-
-fn actual_spend_after_income_and_credit(entries: &[LedgerEntry], month: &str) -> f64 {
-    (gross_expense_for_month(entries, month)
-        - funding_for_month(entries, month)
-        - rent_credit_for_month(entries, month))
-    .max(0.0)
+fn actual_spend_after_rent_credit(entries: &[LedgerEntry], month: &str) -> f64 {
+    net_spending_for_month(entries, month)
 }
 
 fn net_category_spending<'a>(
@@ -3901,7 +3874,7 @@ fn calculate_snapshot_with_query(
         let month_end = end_of_month(month_start);
         let spent = net_spending_for_month(&filtered_entries, month);
         let gross_spend = gross_expense_for_month(&filtered_entries, month);
-        let actual_spend = actual_spend_after_income_and_credit(&filtered_entries, month);
+        let actual_spend = actual_spend_after_rent_credit(&filtered_entries, month);
         let cap_health = cap_health_for_month(&filtered_entries, &filtered_caps, month);
         let cap_total = cap_health.cap_total;
         let phase = if month_start < current_month_start {
@@ -7747,7 +7720,7 @@ mod tests {
         assert_eq!(snapshot.spending_to_date, 650.0);
         assert_eq!(snapshot.monthly_series[0].spent, 650.0);
         assert_eq!(snapshot.monthly_series[0].gross_spend, 1050.0);
-        assert_eq!(snapshot.monthly_series[0].actual_spend, 550.0);
+        assert_eq!(snapshot.monthly_series[0].actual_spend, 650.0);
         assert_eq!(snapshot.monthly_spending_totals[0].value, 650.0);
         assert_eq!(snapshot.activity_groups[0].total_expense, 650.0);
         assert!(snapshot

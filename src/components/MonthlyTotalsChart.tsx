@@ -41,10 +41,10 @@ export function MonthlyTotalsChart({ data }: MonthlyTotalsChartProps) {
 
     return {
       ...item,
-      primaryLabel: "Spent",
+      primaryLabel: "Gross spent",
       primaryValue: item.gross_spend,
       primaryColor: "var(--color-clay)",
-      secondaryLabel: "After income/credits",
+      secondaryLabel: "Net spent",
       secondaryValue: item.actual_spend,
       secondaryColor:
         item.phase === "current" ? "var(--color-current)" : "var(--color-forest)",
@@ -86,7 +86,20 @@ export function MonthlyTotalsChart({ data }: MonthlyTotalsChartProps) {
                     const bandHeight = yScale.bandwidth();
                     const primaryWidth = Math.max(xScale(item.primaryValue), 0);
                     const secondaryWidth = Math.max(xScale(item.secondaryValue), 0);
-                    const valueX = Math.min(Math.max(primaryWidth, secondaryWidth) + 8, innerWidth);
+                    const primaryIsBehind = item.primaryValue >= item.secondaryValue;
+                    const backWidth = primaryIsBehind ? primaryWidth : secondaryWidth;
+                    const backColor = primaryIsBehind ? item.primaryColor : item.secondaryColor;
+                    const frontWidth = primaryIsBehind ? secondaryWidth : primaryWidth;
+                    const frontColor = primaryIsBehind ? item.secondaryColor : item.primaryColor;
+                    const valueX = Math.min(backWidth + 8, innerWidth);
+                    const valueLabel =
+                      item.phase === "future"
+                        ? `${currency(item.primaryValue)} planned / ${currency(
+                            item.secondaryValue,
+                          )} predicted`
+                        : `${currency(item.secondaryValue)} net / ${currency(
+                            item.primaryValue,
+                          )} gross`;
 
                     return (
                       <g key={item.month_key}>
@@ -99,21 +112,22 @@ export function MonthlyTotalsChart({ data }: MonthlyTotalsChartProps) {
                           y={bandY}
                         />
                         <Bar
-                          fill={item.primaryColor}
+                          fill={backColor}
                           height={bandHeight}
-                          opacity={0.74}
+                          opacity={0.68}
                           rx={10}
-                          width={primaryWidth}
+                          width={backWidth}
                           x={0}
                           y={bandY}
                         />
                         <Bar
-                          fill={item.secondaryColor}
-                          height={Math.max(bandHeight * 0.48, 8)}
-                          rx={8}
-                          width={secondaryWidth}
+                          fill={frontColor}
+                          height={bandHeight}
+                          opacity={0.92}
+                          rx={10}
+                          width={frontWidth}
                           x={0}
-                          y={bandY + bandHeight * 0.26}
+                          y={bandY}
                         />
                         <text
                           dy="0.35em"
@@ -136,7 +150,7 @@ export function MonthlyTotalsChart({ data }: MonthlyTotalsChartProps) {
                           x={valueX}
                           y={bandY + bandHeight / 2}
                         >
-                          {currency(item.secondaryValue)} / {currency(item.primaryValue)}
+                          {valueLabel}
                         </text>
                       </g>
                     );
@@ -149,8 +163,8 @@ export function MonthlyTotalsChart({ data }: MonthlyTotalsChartProps) {
       </div>
       <div className={styles.legend}>
         {[
-          { label: "Spent", color: "var(--color-clay)" },
-          { label: "After income/credits", color: "var(--color-forest)" },
+          { label: "Gross spent", color: "var(--color-clay)" },
+          { label: "Net spent", color: "var(--color-forest)" },
           { label: "Current month", color: "var(--color-current)" },
           { label: "Planned future", color: "var(--color-planned)" },
           { label: "Predicted future", color: "var(--color-predicted)" },

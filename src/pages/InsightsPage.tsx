@@ -224,8 +224,8 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
             <thead>
               <tr>
                 <th>Month</th>
-                <th>Spent</th>
-                <th>After income/credits</th>
+                <th>Gross spent</th>
+                <th>Net spent</th>
                 <th>Planned</th>
                 <th>Predicted</th>
                 <th>Ledger net</th>
