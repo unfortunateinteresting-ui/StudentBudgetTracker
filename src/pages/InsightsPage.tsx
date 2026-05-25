@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import { BarChart } from "../components/BarChart";
 import { LineChart } from "../components/LineChart";
 import { MetricCard } from "../components/MetricCard";
+import { MonthlyTotalsChart } from "../components/MonthlyTotalsChart";
 import { SectionCard } from "../components/SectionCard";
 import { currency, monthLabel } from "../lib/format";
 import type { InsightSnapshot } from "../lib/types";
@@ -30,20 +31,18 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
     });
   }, [snapshot.activity_groups, snapshot.monthly_series]);
 
-  const overCapMonths = monthlyRows.filter((row) => row.cap > 0 && row.spent > row.cap);
+  const overMaxMonths = monthlyRows.filter((row) => row.cap > 0 && row.spent > row.cap);
   const finalMonth = monthlyRows[monthlyRows.length - 1];
   const topCategory = [...snapshot.category_spend_this_month].sort((left, right) => {
     return right.value - left.value;
   })[0];
-  const monthlySpendBars = useMemo(
-    () =>
-      snapshot.monthly_series.map((point) => ({
-        label: monthLabel(point.month_key),
-        value: point.phase === "actual" ? point.spent : point.planned_spend,
-        color: point.phase === "actual" ? "var(--color-clay)" : "var(--color-planned)",
-      })),
-    [snapshot.monthly_series],
-  );
+  const maxDifference = snapshot.this_month_capped_spend - snapshot.this_month_cap;
+  const maxStatus =
+    snapshot.this_month_cap <= 0
+      ? "No monthly max is set."
+      : maxDifference > 0
+        ? `Over max by ${currency(maxDifference)}.`
+        : `Under max by ${currency(Math.abs(maxDifference))}.`;
 
   return (
     <div className={styles.page}>
@@ -64,11 +63,9 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
         />
         <MetricCard
           eyebrow="Current month"
-          note={`Total net spend ${currency(snapshot.this_month_spend)}. Uncapped spend ${currency(
-            snapshot.this_month_uncapped_spend,
-          )}.`}
+          note={`Recommended max ${currency(snapshot.this_month_cap)}. ${maxStatus}`}
           onWhy={() => onWhy("this_month_spend")}
-          title="Capped spend"
+          title="Monthly max"
           valueTone="cap"
           value={`${currency(snapshot.this_month_capped_spend)} / ${currency(snapshot.this_month_cap)}`}
         />
@@ -110,7 +107,7 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
       <div className={styles.grid2}>
         <MetricCard
           eyebrow="Planning"
-          note="Includes remaining recurring bills and monthly caps."
+          note="Includes remaining recurring bills and monthly maximums."
           onWhy={() => onWhy("projected_end_of_year_cushion")}
           title="Projected end balance"
           value={currency(snapshot.projected_end_of_year_cushion)}
@@ -127,12 +124,12 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
       <div className={styles.grid2}>
         <SectionCard
           eyebrow="Planning window"
-          title="Monthly spending, cap, and end balance"
+          title="Spent, planned, predicted, balance"
         >
           <LineChart data={snapshot.monthly_series} />
         </SectionCard>
         <SectionCard eyebrow="School year" title="Spending by month">
-          <BarChart color="var(--color-clay)" data={monthlySpendBars} />
+          <MonthlyTotalsChart data={snapshot.monthly_series} />
         </SectionCard>
       </div>
 
@@ -194,8 +191,8 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
               <span className={styles.inlineValue}>{monthlyRows.length}</span>
             </div>
             <div className={styles.summaryRow}>
-              <span>Over-cap months</span>
-              <span className={styles.inlineValue}>{overCapMonths.length}</span>
+              <span>Over max months</span>
+              <span className={styles.inlineValue}>{overMaxMonths.length}</span>
             </div>
             <div className={styles.summaryRow}>
               <span>Spending to date</span>
@@ -227,14 +224,15 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
             <thead>
               <tr>
                 <th>Month</th>
-                <th>Net spend</th>
+                <th>Spent</th>
+                <th>After income/credits</th>
                 <th>Planned</th>
                 <th>Predicted</th>
                 <th>Ledger net</th>
-                <th>Funding</th>
+                <th>Income</th>
                 <th>Rent credit</th>
-                <th>Cap</th>
-                <th>End balance</th>
+                <th>Max</th>
+                <th>Balance</th>
               </tr>
             </thead>
             <tbody>
@@ -242,7 +240,8 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
                 monthlyRows.map((row) => (
                   <tr key={row.month_key}>
                     <td>{monthLabel(row.month_key)}</td>
-                    <td>{currency(row.spent)}</td>
+                    <td>{currency(row.gross_spend)}</td>
+                    <td>{currency(row.actual_spend)}</td>
                     <td className={styles.plannedValue}>{currency(row.planned_spend)}</td>
                     <td className={styles.predictedValue}>{currency(row.predicted_spend)}</td>
                     <td>{currency(row.net_spend)}</td>
@@ -254,7 +253,7 @@ export function InsightsPage({ snapshot, onWhy }: InsightsPageProps) {
                 ))
               ) : (
                 <tr>
-                  <td className={styles.emptyState} colSpan={9}>
+                  <td className={styles.emptyState} colSpan={10}>
                     No monthly insight rows available yet.
                   </td>
                 </tr>

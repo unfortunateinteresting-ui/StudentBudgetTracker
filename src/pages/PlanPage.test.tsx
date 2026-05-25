@@ -111,6 +111,8 @@ const snapshot: InsightSnapshot = {
     {
       month_key: "2026-11",
       spent: 180,
+      gross_spend: 180,
+      actual_spend: 180,
       cap: 250,
       planned_spend: 180,
       predicted_spend: 180,
@@ -120,6 +122,8 @@ const snapshot: InsightSnapshot = {
     {
       month_key: "2026-10",
       spent: 60,
+      gross_spend: 60,
+      actual_spend: 60,
       cap: 90,
       planned_spend: 60,
       predicted_spend: 60,
@@ -232,7 +236,7 @@ describe("PlanPage", () => {
       />,
     );
 
-    const capSection = screen.getByText("Nov 2026 cap coverage").closest("section");
+    const capSection = screen.getByText("Nov 2026 max and spending").closest("section");
     expect(capSection).not.toBeNull();
 
     const capRow = within(capSection as HTMLElement)
@@ -249,7 +253,7 @@ describe("PlanPage", () => {
     const amountInput = screen.getByDisplayValue("250");
     await user.clear(amountInput);
     await user.type(amountInput, "320");
-    await user.click(screen.getByRole("button", { name: "Update cap" }));
+    await user.click(screen.getByRole("button", { name: "Update max" }));
 
     await waitFor(() => {
       expect(api.setMonthlyCap).toHaveBeenCalledWith({
@@ -318,20 +322,20 @@ describe("PlanPage", () => {
       />,
     );
 
-    let capSection = screen.getByText("Nov 2026 cap coverage").closest("section");
+    let capSection = screen.getByText("Nov 2026 max and spending").closest("section");
     expect(capSection).not.toBeNull();
     expect(within(capSection as HTMLElement).getByText("food")).toBeInTheDocument();
     expect(within(capSection as HTMLElement).queryByText("transport")).not.toBeInTheDocument();
 
     await user.selectOptions(screen.getByLabelText("Show month"), "2026-10");
 
-    capSection = screen.getByText("Oct 2026 cap coverage").closest("section");
+    capSection = screen.getByText("Oct 2026 max and spending").closest("section");
     expect(capSection).not.toBeNull();
     expect(within(capSection as HTMLElement).getByText("transport")).toBeInTheDocument();
     expect(within(capSection as HTMLElement).queryByText("food")).not.toBeInTheDocument();
   });
 
-  it("generates monthly caps from history after confirmation", async () => {
+  it("generates monthly maximums from history after confirmation", async () => {
     const user = userEvent.setup();
     const onRefresh = vi.fn().mockResolvedValue(undefined);
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);

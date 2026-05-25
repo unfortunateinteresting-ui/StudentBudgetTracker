@@ -2,7 +2,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useEffect, useMemo, useState } from "react";
 
 import { createEntry, updateEntry } from "../lib/api";
-import { localNowIso } from "../lib/format";
+import { entryKindLabel, localNowIso } from "../lib/format";
 import { categoryOptions, labelOptions } from "../lib/suggestions";
 import type { Account, EntryKind, LedgerEntry, MonthlyCap, RecurringRule } from "../lib/types";
 import styles from "./Dialog.module.css";
@@ -149,7 +149,7 @@ export function EntryDialog({
           </Dialog.Title>
           <Dialog.Description asChild>
             <p className={styles.note}>
-              Use guided entry for funding, rent credits, manual exclusions, or adjustments.
+              Use guided entry for income, rent credits, manual exclusions, or adjustments.
             </p>
           </Dialog.Description>
           {!entry && !activeAccounts.length ? (
@@ -192,7 +192,7 @@ export function EntryDialog({
               >
                 {ENTRY_KINDS.map((kind) => (
                   <option key={kind} value={kind}>
-                    {kind}
+                    {entryKindLabel(kind)}
                   </option>
                 ))}
               </select>

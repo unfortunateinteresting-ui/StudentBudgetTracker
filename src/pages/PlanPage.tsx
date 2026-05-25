@@ -9,7 +9,13 @@ import {
   setMonthlyCap,
   updateRecurringRule,
 } from "../lib/api";
-import { currentMonthKey, currency, monthLabel, shiftMonthKey } from "../lib/format";
+import {
+  currentMonthKey,
+  currency,
+  entryKindLabel,
+  monthLabel,
+  shiftMonthKey,
+} from "../lib/format";
 import { categorySpendValue, netSpendingByCategory, netSpendingTotal } from "../lib/spending";
 import { categoryOptions } from "../lib/suggestions";
 import type {
@@ -226,10 +232,6 @@ export function PlanPage({
     [visibleMonthCaps, visibleMonthSpendByCategory],
   );
 
-  const visibleMonthRemainingRoom = visibleMonthCaps.reduce((sum, item) => {
-    const spent = categorySpendValue(visibleMonthSpendByCategory, item.category);
-    return sum + Math.max(item.amount - spent, 0);
-  }, 0);
   const visibleMonthUncappedSpend = Math.max(visibleMonthNetSpend - visibleMonthSpendTotal, 0);
 
   const upcomingObligationTotal = useMemo(
@@ -253,7 +255,9 @@ export function PlanPage({
 
   const planningMonths = useMemo(() => {
     if (snapshot.monthly_series.length) {
-      return snapshot.monthly_series.slice(0, settings.school_year_months);
+      return snapshot.monthly_series
+        .filter((item) => item.phase !== "future")
+        .slice(0, settings.school_year_months);
     }
 
     return Array.from({ length: settings.school_year_months }, (_, index) => {
@@ -262,6 +266,11 @@ export function PlanPage({
         month_key: monthKey,
         spent: 0,
         cap: 0,
+        gross_spend: 0,
+        actual_spend: 0,
+        planned_spend: 0,
+        predicted_spend: 0,
+        phase: "current" as const,
         runway_balance: snapshot.total_available_cash,
       };
     });
@@ -346,11 +355,11 @@ export function PlanPage({
 
   const handleCapSave = async () => {
     if (!cap.category.trim()) {
-      setNotice({ kind: "error", text: "Monthly caps need a category." });
+      setNotice({ kind: "error", text: "Monthly maximums need a category." });
       return;
     }
     if (Number(cap.amount) <= 0) {
-      setNotice({ kind: "error", text: "Monthly cap amount must be greater than zero." });
+      setNotice({ kind: "error", text: "Monthly maximum must be greater than zero." });
       return;
     }
 
@@ -361,7 +370,7 @@ export function PlanPage({
           amount: Number(cap.amount),
           month_key: cap.month_key,
         }),
-      editingCap ? "Monthly cap updated." : "Monthly cap saved.",
+      editingCap ? "Monthly maximum updated." : "Monthly maximum saved.",
     );
 
     if (saved) {
@@ -371,7 +380,7 @@ export function PlanPage({
 
   const handleGenerateCaps = async () => {
     const shouldContinue = window.confirm(
-      "Generate caps from variable spending history? This can update existing cap amounts, and undo will restore the previous state.",
+      "Generate monthly maximums from variable spending history? This can update existing maximums, and undo will restore the previous state.",
     );
     if (!shouldContinue) {
       return;
@@ -381,7 +390,7 @@ export function PlanPage({
       const result = await generateCapsFromHistory();
       setNotice({
         kind: "success",
-        text: `Caps generated from history: ${result.created} created, ${result.updated} updated, ${result.unchanged} already current across ${result.months} months.`,
+        text: `Maximums generated from history: ${result.created} created, ${result.updated} updated, ${result.unchanged} already current across ${result.months} months.`,
       });
       await onRefresh();
     } catch (error) {
@@ -426,9 +435,9 @@ export function PlanPage({
       <div className={styles.hero}>
         <div>
           <p className={styles.kicker}>Plan</p>
-          <h1 className={styles.heroTitle}>Recurring bills and monthly caps</h1>
+          <h1 className={styles.heroTitle}>Recurring bills and monthly maximums</h1>
           <p className={styles.heroText}>
-            Use recurring rules for fixed bills and monthly caps for spending targets. Rent
+            Use recurring rules for fixed bills and monthly maximums for spending targets. Rent
             credit only affects rent totals.
           </p>
         </div>
@@ -452,9 +461,9 @@ export function PlanPage({
           value={currency(upcomingObligationTotal)}
         />
         <MetricCard
-          eyebrow="Caps"
-          note={`Current month cap total ${currency(snapshot.this_month_cap)}.`}
-          title="Total caps"
+          eyebrow="Maximums"
+          note={`Current month recommended max ${currency(snapshot.this_month_cap)}.`}
+          title="Total maximums"
           valueTone="cap"
           value={currency(
             sortedCaps.reduce((sum, item) => {
@@ -464,7 +473,7 @@ export function PlanPage({
         />
         <MetricCard
           eyebrow="Planning"
-          note="Remaining recurring bills and caps come from the Rust snapshot."
+          note="Remaining recurring bills and maximums come from the Rust snapshot."
           onWhy={() => onWhy("projected_end_of_year_cushion")}
           title="Projected end balance"
           value={currency(snapshot.projected_end_of_year_cushion)}
@@ -514,26 +523,29 @@ export function PlanPage({
                 <tr>
                   <th>Month</th>
                   <th>Spent</th>
-                  <th>Cap</th>
-                  <th>Cap room</th>
-                  <th>End balance</th>
+                  <th>Planned</th>
+                  <th>Predicted</th>
+                  <th>Balance</th>
                 </tr>
               </thead>
               <tbody>
-                {planningMonths.map((item) => {
-                  const capRoom = item.cap - item.spent;
-                  return (
-                    <tr key={item.month_key}>
-                      <td>{monthLabel(item.month_key)}</td>
-                      <td>{currency(item.spent)}</td>
-                      <td className={styles.capValue}>{currency(item.cap)}</td>
-                      <td className={capRoom >= 0 ? styles.positive : styles.negative}>
-                        {currency(capRoom)}
-                      </td>
-                      <td>{currency(item.runway_balance)}</td>
-                    </tr>
-                  );
-                })}
+                {planningMonths.length ? (
+                  planningMonths.map((item) => (
+                      <tr key={item.month_key}>
+                        <td>{monthLabel(item.month_key)}</td>
+                        <td>{currency(item.spent)}</td>
+                        <td className={styles.plannedValue}>{currency(item.planned_spend)}</td>
+                        <td className={styles.predictedValue}>{currency(item.predicted_spend)}</td>
+                        <td>{currency(item.runway_balance)}</td>
+                      </tr>
+                    ))
+                ) : (
+                  <tr>
+                    <td className={styles.emptyState} colSpan={5}>
+                      No current or past months in this planning window yet.
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -619,7 +631,7 @@ export function PlanPage({
               value={rule.entry_kind}
             >
               <option value="expense">expense</option>
-              <option value="funding">funding</option>
+              <option value="funding">income</option>
               <option value="rent_credit">rent_credit</option>
               <option value="adjustment">adjustment</option>
             </select>
@@ -764,7 +776,7 @@ export function PlanPage({
                         <div>{item.label}</div>
                         <div className={styles.minor}>{item.category}</div>
                       </td>
-                      <td>{item.entry_kind}</td>
+                      <td>{entryKindLabel(item.entry_kind)}</td>
                       <td>{accountNameById.get(item.account_id) ?? item.account_id}</td>
                       <td>
                         <div>{item.frequency}</div>
@@ -838,7 +850,7 @@ export function PlanPage({
 
         <section className={styles.stack}>
           <h2 className={styles.sectionHeading}>
-            {editingCap ? "Adjust monthly cap" : "Monthly caps"}
+            {editingCap ? "Adjust monthly max" : "Monthly max"}
           </h2>
           <div className={styles.filters}>
             <input
@@ -851,7 +863,7 @@ export function PlanPage({
             <input
               className={styles.input}
               onChange={(event) => setCap({ ...cap, amount: event.target.value })}
-              placeholder="Amount"
+              placeholder="Max amount"
               type="number"
               value={cap.amount}
             />
@@ -863,14 +875,14 @@ export function PlanPage({
               value={cap.month_key}
             />
             <button className={styles.primaryButton} onClick={handleCapSave} type="button">
-              {editingCap ? "Update cap" : "Save cap"}
+              {editingCap ? "Update max" : "Save max"}
             </button>
           </div>
           {editingCap ? (
             <div className={styles.stack}>
               <div className={styles.helperText}>
-                Category and month stay locked while editing because the current cap command
-                keys updates by that pair.
+                Category and month stay locked while editing because each max is saved by
+                category and month.
               </div>
               <div className={styles.rowActions}>
                 <button
@@ -912,36 +924,40 @@ export function PlanPage({
                 </label>
               </div>
             }
-            eyebrow="Monthly caps"
-            title={`${monthLabel(visibleCapMonth)} cap coverage`}
+            eyebrow="Monthly max"
+            title={`${monthLabel(visibleCapMonth)} max and spending`}
           >
             <div className={styles.helperText}>
-              Generated caps use variable expense history only. Rent and recurring fixed bills
+              Generated maximums use variable expense history only. Rent and recurring fixed bills
               stay in recurring rules so planned totals do not double-count them.
             </div>
             <div className={styles.statGrid}>
               <div className={styles.statBlock}>
-                <div className={styles.statLabel}>Cap total</div>
+                <div className={styles.statLabel}>Recommended max</div>
                 <div className={`${styles.statValue} ${styles.capValue}`}>
                   {currency(visibleMonthCapTotal)}
                 </div>
               </div>
               <div className={styles.statBlock}>
-                <div className={styles.statLabel}>Capped spend</div>
+                <div className={styles.statLabel}>Spent in max categories</div>
                 <div className={styles.statValue}>{currency(visibleMonthSpendTotal)}</div>
               </div>
               <div className={styles.statBlock}>
-                <div className={styles.statLabel}>Remaining cap room</div>
+                <div className={styles.statLabel}>
+                  {visibleMonthSpendTotal > visibleMonthCapTotal ? "Over max" : "Under max"}
+                </div>
                 <div
                   className={`${styles.statValue} ${
-                    visibleMonthRemainingRoom >= 0 ? styles.positive : styles.negative
+                    visibleMonthSpendTotal <= visibleMonthCapTotal
+                      ? styles.positive
+                      : styles.negative
                   }`}
                 >
-                  {currency(visibleMonthRemainingRoom)}
+                  {currency(Math.abs(visibleMonthCapTotal - visibleMonthSpendTotal))}
                 </div>
               </div>
               <div className={styles.statBlock}>
-                <div className={styles.statLabel}>Uncapped spend</div>
+                <div className={styles.statLabel}>Spending outside max categories</div>
                 <div className={styles.statValue}>{currency(visibleMonthUncappedSpend)}</div>
               </div>
             </div>
@@ -951,9 +967,9 @@ export function PlanPage({
                 <thead>
                   <tr>
                     <th>Category</th>
-                    <th>Cap</th>
+                    <th>Max</th>
                     <th>Spent</th>
-                    <th>Variance</th>
+                    <th>Over/under</th>
                     <th />
                   </tr>
                 </thead>
@@ -984,7 +1000,7 @@ export function PlanPage({
                                 onClick={() =>
                                   void runAction(
                                     () => deleteMonthlyCap(item.id),
-                                    `Deleted ${item.category} cap for ${item.month_key}.`,
+                                    `Deleted ${item.category} max for ${item.month_key}.`,
                                   )
                                 }
                                 type="button"
@@ -999,7 +1015,7 @@ export function PlanPage({
                   ) : (
                     <tr>
                       <td className={styles.emptyState} colSpan={5}>
-                        No caps saved for {monthLabel(visibleCapMonth)}.
+                        No maximums saved for {monthLabel(visibleCapMonth)}.
                       </td>
                     </tr>
                   )}

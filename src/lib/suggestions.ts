@@ -13,7 +13,7 @@ export const SPENDING_CATEGORIES = [
   "misc",
 ];
 
-export const FUNDING_CATEGORIES = ["income", "other funding", "financial aid", "guarantor"];
+export const FUNDING_CATEGORIES = ["income", "other income", "financial aid", "guarantor"];
 
 export const STARTER_CATEGORIES = [...SPENDING_CATEGORIES, ...FUNDING_CATEGORIES, "adjustment"];
 

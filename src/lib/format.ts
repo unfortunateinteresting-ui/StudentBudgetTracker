@@ -42,3 +42,9 @@ export const currentMonthKey = () => {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 };
+
+export const entryKindLabel = (kind: string) => {
+  if (kind === "funding") return "income";
+  if (kind === "rent_credit") return "rent credit";
+  return kind.replace(/_/g, " ");
+};

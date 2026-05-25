@@ -1,6 +1,6 @@
 [package]
 name = "student-budget-tracker"
-version = "0.1.14"
+version = "0.1.15"
 description = "Student budget tracker desktop rebuild"
 authors = ["Mouzzia"]
 edition = "2021"

@@ -119,7 +119,7 @@ export function QuickAddBar({
           (!activeAccounts.length
             ? "Create at least one active account to enable quick add."
             : null) ||
-          "Quick add is expense-only. Use guided entry for funding, rent credits, transfers, adjustments, or exclusions."}
+          "Quick add is expense-only. Use guided entry for income, rent credits, transfers, adjustments, or exclusions."}
       </div>
     </div>
   );

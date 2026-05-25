@@ -2,9 +2,10 @@ import { useMemo } from "react";
 
 import { BarChart } from "../components/BarChart";
 import { MetricCard } from "../components/MetricCard";
+import { MonthlyTotalsChart } from "../components/MonthlyTotalsChart";
 import { QuickAddBar } from "../components/QuickAddBar";
 import { SectionCard } from "../components/SectionCard";
-import { compactDate, currency, monthLabel } from "../lib/format";
+import { compactDate, currency, entryKindLabel } from "../lib/format";
 import type { Account, InsightSnapshot, LedgerEntry, MonthlyCap, RecurringRule } from "../lib/types";
 import styles from "./Page.module.css";
 
@@ -31,15 +32,13 @@ export function HomePage({
     () => new Map(accounts.map((account) => [account.id, account.name])),
     [accounts],
   );
-  const monthlySpendBars = useMemo(
-    () =>
-      snapshot.monthly_series.map((point) => ({
-        label: monthLabel(point.month_key),
-        value: point.phase === "actual" ? point.spent : point.planned_spend,
-        color: point.phase === "actual" ? "var(--color-clay)" : "var(--color-planned)",
-      })),
-    [snapshot.monthly_series],
-  );
+  const maxDifference = snapshot.this_month_capped_spend - snapshot.this_month_cap;
+  const maxStatus =
+    snapshot.this_month_cap <= 0
+      ? "No monthly max is set."
+      : maxDifference > 0
+        ? `Over max by ${currency(maxDifference)}.`
+        : `Under max by ${currency(Math.abs(maxDifference))}.`;
 
   return (
     <div className={styles.page}>
@@ -61,18 +60,16 @@ export function HomePage({
       <div className={styles.grid4}>
         <MetricCard
           eyebrow="Cash"
-          note="Opening balances + funding + rent credits + adjustments - expenses."
+          note="Opening balances + income + rent credits + adjustments - expenses."
           onWhy={() => onWhy("total_available_cash")}
           title="Total available"
           value={currency(snapshot.total_available_cash)}
         />
         <MetricCard
           eyebrow="This month"
-          note={`Total net spend ${currency(snapshot.this_month_spend)}. Remaining cap room ${currency(
-            snapshot.this_month_cap_remaining,
-          )}.`}
+          note={`Recommended max ${currency(snapshot.this_month_cap)}. ${maxStatus}`}
           onWhy={() => onWhy("this_month_spend")}
-          title="Capped spend"
+          title="Monthly max"
           valueTone="cap"
           value={`${currency(snapshot.this_month_capped_spend)} / ${currency(snapshot.this_month_cap)}`}
         />
@@ -85,7 +82,7 @@ export function HomePage({
         />
         <MetricCard
           eyebrow="Planning"
-          note="Estimated balance after remaining bills and caps in the planning window."
+          note="Estimated balance after remaining bills and monthly maximums in the planning window."
           onWhy={() => onWhy("projected_end_of_year_cushion")}
           title="Projected end balance"
           value={currency(snapshot.projected_end_of_year_cushion)}
@@ -175,7 +172,7 @@ export function HomePage({
 
       <div className={styles.grid2}>
         <SectionCard eyebrow="School year" title="Spending by month">
-          <BarChart color="var(--color-clay)" data={monthlySpendBars} />
+          <MonthlyTotalsChart data={snapshot.monthly_series} />
         </SectionCard>
         <SectionCard eyebrow="School year" title="Average spend by category">
           <BarChart data={snapshot.category_average_spend} />
@@ -209,7 +206,7 @@ export function HomePage({
                 <td>{compactDate(entry.occurred_at_local)}</td>
                 <td>{accountNameById.get(entry.account_id) ?? entry.account_id}</td>
                 <td>{entry.label}</td>
-                <td>{entry.entry_kind}</td>
+                <td>{entryKindLabel(entry.entry_kind)}</td>
                 <td>{entry.category}</td>
                 <td>{currency(entry.amount)}</td>
               </tr>

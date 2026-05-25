@@ -100,6 +100,8 @@ export interface ChartPoint {
 export interface MonthlySeriesPoint {
   month_key: string;
   spent: number;
+  gross_spend: number;
+  actual_spend: number;
   cap: number;
   planned_spend: number;
   predicted_spend: number;

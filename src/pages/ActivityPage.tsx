@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 
 import { deleteEntry } from "../lib/api";
 import { QuickAddBar } from "../components/QuickAddBar";
-import { compactDate, currency, monthLabel } from "../lib/format";
+import { compactDate, currency, entryKindLabel, monthLabel } from "../lib/format";
 import { netSpendingTotal } from "../lib/spending";
 import type { Account, LedgerEntry, MonthlyCap, RecurringRule } from "../lib/types";
 import { MetricCard } from "../components/MetricCard";
@@ -21,7 +21,7 @@ interface ActivityPageProps {
 type ActivityTotals = {
   expense: number;
   netSpending: number;
-  funding: number;
+  income: number;
   rentCredit: number;
   adjustment: number;
   excluded: number;
@@ -30,7 +30,7 @@ type ActivityTotals = {
 const zeroTotals = (): ActivityTotals => ({
   expense: 0,
   netSpending: 0,
-  funding: 0,
+  income: 0,
   rentCredit: 0,
   adjustment: 0,
   excluded: 0,
@@ -82,7 +82,7 @@ export function ActivityPage({
         return current;
       }
       if (entry.entry_kind === "expense") current.expense += Math.abs(entry.amount);
-      if (entry.entry_kind === "funding") current.funding += Math.abs(entry.amount);
+      if (entry.entry_kind === "funding") current.income += Math.abs(entry.amount);
       if (entry.entry_kind === "rent_credit") current.rentCredit += Math.abs(entry.amount);
       if (entry.entry_kind === "adjustment") current.adjustment += entry.amount;
       return current;
@@ -156,9 +156,9 @@ export function ActivityPage({
         />
         <MetricCard
           eyebrow="Filtered inflow"
-          note={`Funding inflows affect balances, not spending totals.`}
-          title="Funding"
-          value={currency(filteredTotals.funding)}
+          note="Income increases balances."
+          title="Income"
+          value={currency(filteredTotals.income)}
         />
         <MetricCard
           eyebrow="Rent offset"
@@ -230,7 +230,7 @@ export function ActivityPage({
                 <span className={styles.groupTotal}>
                   Expense {currency(monthState.totals.expense)}
                 </span>
-                <span className={styles.groupTotal}>Funding {currency(monthState.totals.funding)}</span>
+                <span className={styles.groupTotal}>Income {currency(monthState.totals.income)}</span>
                 <span className={styles.groupTotal}>
                   Rent credit {currency(monthState.totals.rentCredit)}
                 </span>
@@ -259,7 +259,7 @@ export function ActivityPage({
                       <td>{compactDate(entry.occurred_at_local)}</td>
                       <td>{accountNameById.get(entry.account_id) ?? entry.account_id}</td>
                       <td>{entry.label}</td>
-                      <td>{entry.entry_kind}</td>
+                      <td>{entryKindLabel(entry.entry_kind)}</td>
                       <td>{entry.category}</td>
                       <td>{currency(entry.amount)}</td>
                       <td>{entry.exclude_from_insights ? "Excluded" : ""}</td>

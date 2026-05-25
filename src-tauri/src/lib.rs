@@ -1415,6 +1415,49 @@ fn net_spending_for_month(entries: &[LedgerEntry], month: &str) -> f64 {
     )
 }
 
+fn gross_expense_for_month(entries: &[LedgerEntry], month: &str) -> f64 {
+    entries
+        .iter()
+        .filter(|entry| {
+            !entry.exclude_from_insights
+                && entry.entry_kind == EntryKind::Expense
+                && month_key(&entry.occurred_at_local) == Some(month)
+        })
+        .map(|entry| entry.amount.abs())
+        .sum()
+}
+
+fn funding_for_month(entries: &[LedgerEntry], month: &str) -> f64 {
+    entries
+        .iter()
+        .filter(|entry| {
+            !entry.exclude_from_insights
+                && entry.entry_kind == EntryKind::Funding
+                && month_key(&entry.occurred_at_local) == Some(month)
+        })
+        .map(|entry| entry.amount.abs())
+        .sum()
+}
+
+fn rent_credit_for_month(entries: &[LedgerEntry], month: &str) -> f64 {
+    entries
+        .iter()
+        .filter(|entry| {
+            !entry.exclude_from_insights
+                && entry.entry_kind == EntryKind::RentCredit
+                && month_key(&entry.occurred_at_local) == Some(month)
+        })
+        .map(|entry| entry.amount.abs())
+        .sum()
+}
+
+fn actual_spend_after_income_and_credit(entries: &[LedgerEntry], month: &str) -> f64 {
+    (gross_expense_for_month(entries, month)
+        - funding_for_month(entries, month)
+        - rent_credit_for_month(entries, month))
+    .max(0.0)
+}
+
 fn net_category_spending<'a>(
     entries: impl Iterator<Item = &'a LedgerEntry>,
 ) -> HashMap<String, f64> {
@@ -3857,6 +3900,8 @@ fn calculate_snapshot_with_query(
         let month_start = parse_month_start(month)?;
         let month_end = end_of_month(month_start);
         let spent = net_spending_for_month(&filtered_entries, month);
+        let gross_spend = gross_expense_for_month(&filtered_entries, month);
+        let actual_spend = actual_spend_after_income_and_credit(&filtered_entries, month);
         let cap_health = cap_health_for_month(&filtered_entries, &filtered_caps, month);
         let cap_total = cap_health.cap_total;
         let phase = if month_start < current_month_start {
@@ -3911,6 +3956,8 @@ fn calculate_snapshot_with_query(
         monthly_series.push(MonthlySeriesPoint {
             month_key: month.clone(),
             spent,
+            gross_spend,
+            actual_spend,
             cap: cap_total,
             planned_spend,
             predicted_spend,
@@ -3941,11 +3988,17 @@ fn calculate_snapshot_with_query(
         build_lines(vec![
             format!("This month net spend = {}", this_month_spend),
             "Rent credit is subtracted from rent only; rent never goes below zero.".to_string(),
-            format!("This month cap total = {}", this_month_cap),
-            format!("Capped category spend = {}", this_month_capped_spend),
-            format!("Uncapped spend = {}", this_month_uncapped_spend),
-            format!("Remaining cap room = {}", this_month_cap_remaining),
-            "Cap room is calculated per category; uncapped categories do not consume cap room."
+            format!("This month recommended max = {}", this_month_cap),
+            format!(
+                "Spend in categories with a max = {}",
+                this_month_capped_spend
+            ),
+            format!(
+                "Spend outside max categories = {}",
+                this_month_uncapped_spend
+            ),
+            format!("Under max by = {}", this_month_cap_remaining),
+            "Maximums are calculated per category; categories without a max do not consume max room."
                 .to_string(),
             "Excluded entries are ignored here.".to_string(),
         ]),
@@ -3967,8 +4020,8 @@ fn calculate_snapshot_with_query(
         build_lines(vec![
             format!("Spending to date = {}", spending_to_date),
             format!("Remaining fixed bills = {}", remaining_fixed_bills),
-            format!("Remaining monthly caps = {}", remaining_caps),
-            "Current-month caps use remaining room per category; future months use full caps."
+            format!("Remaining monthly maximums = {}", remaining_caps),
+            "Current-month maximums use remaining room per category; future months use full maximums."
                 .to_string(),
             format!(
                 "Planned remaining spending = {}",
@@ -4016,8 +4069,8 @@ fn calculate_snapshot_with_query(
         build_lines(vec![
             format!("Total available cash = {}", total_available_cash),
             format!("Remaining fixed bills = {}", remaining_fixed_bills),
-            format!("Remaining monthly caps = {}", remaining_caps),
-            "Current-month caps use remaining room per category; uncapped spend is not subtracted twice."
+            format!("Remaining monthly maximums = {}", remaining_caps),
+            "Current-month maximums use remaining room per category; spending outside max categories is not subtracted twice."
                 .to_string(),
             format!(
                 "Projected end balance for the planning window = {}",
@@ -4135,7 +4188,7 @@ fn breakdown_for_metric(
                         .unwrap_or(0.0)
                 ),
                 format!(
-                    "Funding = {}",
+                    "Income = {}",
                     month_activity
                         .map(|group| group.total_funding)
                         .unwrap_or(0.0)
@@ -4147,7 +4200,7 @@ fn breakdown_for_metric(
                         .unwrap_or(0.0)
                 ),
                 format!(
-                    "Cap = {}",
+                    "Max = {}",
                     month_point.map(|point| point.cap).unwrap_or(0.0)
                 ),
                 format!(
@@ -7666,6 +7719,23 @@ mod tests {
             },
         )
         .unwrap();
+        insert_entry_raw(
+            &conn,
+            &LedgerEntry {
+                id: "income-entry".into(),
+                account_id: "account-a".into(),
+                entry_kind: EntryKind::Funding,
+                amount: 100.0,
+                occurred_at_local: date_to_occurrence_iso(current_month_start),
+                label: "Income".into(),
+                category: "income".into(),
+                notes: "".into(),
+                recurring_rule_id: None,
+                transfer_group_id: None,
+                exclude_from_insights: false,
+            },
+        )
+        .unwrap();
 
         let snapshot = calculate_snapshot(&conn).unwrap();
 
@@ -7676,6 +7746,8 @@ mod tests {
         assert_eq!(snapshot.this_month_spend, 650.0);
         assert_eq!(snapshot.spending_to_date, 650.0);
         assert_eq!(snapshot.monthly_series[0].spent, 650.0);
+        assert_eq!(snapshot.monthly_series[0].gross_spend, 1050.0);
+        assert_eq!(snapshot.monthly_series[0].actual_spend, 550.0);
         assert_eq!(snapshot.monthly_spending_totals[0].value, 650.0);
         assert_eq!(snapshot.activity_groups[0].total_expense, 650.0);
         assert!(snapshot
@@ -8214,7 +8286,7 @@ mod tests {
             .lines
             .iter()
             .any(|line| line == "Ledger net spend = 85"));
-        assert!(breakdown.lines.iter().any(|line| line == "Cap = 120"));
+        assert!(breakdown.lines.iter().any(|line| line == "Max = 120"));
     }
 
     #[test]

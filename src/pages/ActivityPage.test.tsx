@@ -119,7 +119,7 @@ describe("ActivityPage", () => {
 
     expect(screen.getByText("Net spend $492.00")).toBeInTheDocument();
     expect(screen.getByText("Expense $642.00")).toBeInTheDocument();
-    expect(screen.getByText("Funding $500.00")).toBeInTheDocument();
+    expect(screen.getByText("Income $500.00")).toBeInTheDocument();
     expect(screen.getByText("Rent credit $150.00")).toBeInTheDocument();
     expect(screen.getByText("Adjustment -$20.00")).toBeInTheDocument();
     expect(screen.getAllByText("Checking").length).toBeGreaterThan(0);

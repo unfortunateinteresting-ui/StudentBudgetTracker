@@ -117,7 +117,7 @@ describe("EntryDialog", () => {
     expect(document.querySelector('datalist#entry-category-options option[value="transport"]')).not.toBeNull();
   });
 
-  it("defaults funding entries to income categories", async () => {
+  it("defaults income entries to income categories", async () => {
     const user = userEvent.setup();
 
     render(
@@ -134,7 +134,7 @@ describe("EntryDialog", () => {
 
     expect(screen.getByPlaceholderText("Pick or type a category")).toHaveValue("income");
     expect(
-      document.querySelector('datalist#entry-category-options option[value="other funding"]'),
+      document.querySelector('datalist#entry-category-options option[value="other income"]'),
     ).not.toBeNull();
   });
 });

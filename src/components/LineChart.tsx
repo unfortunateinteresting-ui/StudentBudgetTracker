@@ -29,9 +29,11 @@ export function LineChart({ data }: LineChartProps) {
   }
 
   const tickLegend = [
-    { label: "Ledger spent", color: "var(--color-clay)" },
-    { label: "Cap / planned limit", color: "var(--color-cap)" },
-    { label: "End balance", color: "var(--color-ink)" },
+    { label: "Spent", color: "var(--color-clay)" },
+    { label: "Current month", color: "var(--color-current)" },
+    { label: "Planned", color: "var(--color-planned)" },
+    { label: "Predicted", color: "var(--color-predicted)" },
+    { label: "Balance", color: "var(--color-ink)" },
   ];
 
   return (
@@ -41,7 +43,12 @@ export function LineChart({ data }: LineChartProps) {
           {({ width, height }) => {
             const innerWidth = Math.max(width - margin.left - margin.right, 140);
             const innerHeight = Math.max(height - margin.top - margin.bottom, 140);
-            const values = data.flatMap((item) => [item.spent, item.cap, item.runway_balance]);
+            const values = data.flatMap((item) => [
+              item.spent,
+              item.planned_spend,
+              item.predicted_spend,
+              item.runway_balance,
+            ]);
             const minValue = Math.min(...values, 0);
             const maxValue = Math.max(...values, 0, 1);
             const span = Math.max(maxValue - minValue, 1);
@@ -66,6 +73,12 @@ export function LineChart({ data }: LineChartProps) {
             const tickValues = data
               .filter((_, index) => index % tickStep === 0)
               .map((item) => item.month_key);
+            const spentData = data.filter((item) => item.phase !== "future");
+            const plannedData = data.filter((item) => item.phase === "future");
+            const xForItem = (item: MonthlySeriesPoint) => {
+              const index = data.findIndex((point) => point.month_key === item.month_key);
+              return centers[Math.max(index, 0)] ?? 0;
+            };
             return (
               <svg height={height} width={width}>
                 <Group left={margin.left} top={margin.top}>
@@ -76,19 +89,28 @@ export function LineChart({ data }: LineChartProps) {
                     width={innerWidth}
                   />
                   <LinePath
-                    data={data}
+                    data={spentData}
                     stroke="var(--color-clay)"
                     strokeWidth={3}
-                    x={(_, index) => centers[index]}
+                    x={(item) => xForItem(item)}
                     y={(item) => yScale(item.spent)}
                   />
                   <LinePath
-                    data={data}
-                    stroke="var(--color-cap)"
+                    data={plannedData}
+                    stroke="var(--color-planned)"
                     strokeDasharray="6 5"
                     strokeWidth={3}
-                    x={(_, index) => centers[index]}
-                    y={(item) => yScale(item.cap)}
+                    x={(item) => xForItem(item)}
+                    y={(item) => yScale(item.planned_spend)}
+                  />
+                  <LinePath
+                    data={plannedData}
+                    stroke="var(--color-predicted)"
+                    strokeDasharray="2 5"
+                    strokeLinecap="round"
+                    strokeWidth={3}
+                    x={(item) => xForItem(item)}
+                    y={(item) => yScale(item.predicted_spend)}
                   />
                   <LinePath
                     data={data}
@@ -100,18 +122,29 @@ export function LineChart({ data }: LineChartProps) {
                   />
                   {data.map((item, index) => (
                     <g key={item.month_key}>
-                      <circle
-                        cx={centers[index]}
-                        cy={yScale(item.spent)}
-                        fill="var(--color-clay)"
-                        r={3.2}
-                      />
-                      <circle
-                        cx={centers[index]}
-                        cy={yScale(item.cap)}
-                        fill="var(--color-cap)"
-                        r={3.2}
-                      />
+                      {item.phase !== "future" ? (
+                        <circle
+                          cx={centers[index]}
+                          cy={yScale(item.spent)}
+                          fill={item.phase === "current" ? "var(--color-current)" : "var(--color-clay)"}
+                          r={3.2}
+                        />
+                      ) : (
+                        <>
+                          <circle
+                            cx={centers[index]}
+                            cy={yScale(item.planned_spend)}
+                            fill="var(--color-planned)"
+                            r={3.2}
+                          />
+                          <circle
+                            cx={centers[index]}
+                            cy={yScale(item.predicted_spend)}
+                            fill="var(--color-predicted)"
+                            r={3.2}
+                          />
+                        </>
+                      )}
                       <circle
                         cx={centers[index]}
                         cy={yScale(item.runway_balance)}
